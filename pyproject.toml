@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openadcs-simulation"
+version = "0.1.0"
+description = "Ground-based spacecraft environment simulation for OpenADCS"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24,<3",
+    "astropy>=6,<8",
+    "sgp4>=2.24,<3",
+    "spiceypy>=6,<9",
+    "huira==0.9.9",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+onboard-test = ["ziglang==0.16.0"]
+gui = ["matplotlib>=3.8,<4"]
+
+[project.scripts]
+openadcs-sim = "openadcs_sim.cli:main"
+openadcs-gps-sim = "openadcs_sim.gps_cli:main"
+
+[project.gui-scripts]
+openadcs-sim-gui = "openadcs_sim.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["simulation/src"]
+
+[tool.pytest.ini_options]
+testpaths = ["simulation/tests"]
+markers = ["integration: requires downloaded SPICE kernels"]

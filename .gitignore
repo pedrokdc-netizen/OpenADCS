@@ -1,0 +1,12 @@
+.venv/
+.tools/
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+simulation/data/
+simulation/output/
