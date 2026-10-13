@@ -1,0 +1,21 @@
+{
+  "description": "Illustrative behavioral assumptions, not flight calibration: vertical/velocity sigmas, correlations, eight SVs, DOP, acceleration and zero geoid are assumed. Velocity 0.1 m/s is treated as per-axis sigma only for this example. CLI replaces the inertial-speed placeholder with propagated GCRS speed.",
+  "receiver": {
+    "vertical_sigma_m": 3.0,
+    "velocity_sigma_m_s": 0.1,
+    "position_correlation_s": 10.0,
+    "velocity_correlation_s": 2.0,
+    "seed": 42,
+    "horizontal_cep_m": 2.0,
+    "update_rate_hz": 1,
+    "start_mode": "cold"
+  },
+  "conditions": {
+    "satellites_available": 8,
+    "signal_dbm": -130.0,
+    "inertial_speed_m_s": 0.0,
+    "acceleration_m_s2": 9.0,
+    "geoid_undulation_m": 0.0,
+    "dop": [2.0, 1.7, 1.0, 1.4, 1.0]
+  }
+}

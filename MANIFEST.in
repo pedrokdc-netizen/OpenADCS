@@ -1,0 +1,5 @@
+include simulation/native/xyzgeomag.cpp
+include simulation/vendor/xyzgeomag/XYZgeomag.hpp
+recursive-include onboard *.c *.h CMakeLists.txt
+include tools/build_onboard.py
+include simulation/examples/orion_b16_assumptions.json

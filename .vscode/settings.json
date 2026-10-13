@@ -1,0 +1,41 @@
+{
+  "codegraph.enabled": true,
+  "codegraph.indexOnStartup": true,
+  "codegraph.includeTests": true,
+  "codegraph.includePrivate": true,
+  "codegraph.codeLens.enabled": true,
+  "codegraph.hover.enabled": true,
+  "codegraph.visualization.defaultDepth": 2,
+  "codegraph.fullBodyEmbedding": false,
+  "codegraph.embedOnOpen": false,
+  "codegraph.telemetry.enabled": false,
+  "codegraph.memory.gitMining.enabled": false,
+  "codegraph.excludePatterns": [
+    "**/.git/**",
+    "**/.venv/**",
+    "**/.tools/**",
+    "**/.pytest_cache/**",
+    "**/__pycache__/**",
+    "**/node_modules/**",
+    "**/target/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/out/**",
+    "**/vendor/**",
+    "**/generated/**",
+    "**/coverage/**",
+    "**/logs/**",
+    "**/DerivedData/**",
+    "**/tmp/**",
+    "**/simulation/data/**",
+    "**/simulation/output/**",
+    "**/*.egg-info/**"
+  ],
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv",
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": [
+    "simulation\\tests"
+  ],
+  "cmake.sourceDirectory": "C:/Users/pedro/.copilot/repos/copilot-worktrees/OpenADCS/pedrokdc-netizen-jubilant-enigma/onboard"
+}
