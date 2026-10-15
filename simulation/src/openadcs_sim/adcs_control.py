@@ -17,6 +17,7 @@ Control modes:
 """
 
 from dataclasses import dataclass, field
+import dataclasses
 from enum import Enum
 
 import numpy as np
@@ -55,6 +56,35 @@ def triad(b1, r1, b2, r2) -> np.ndarray:
         t2 /= np.linalg.norm(t2)
         return np.column_stack((t1, t2, np.cross(t1, t2)))
     return frame(r1, r2) @ frame(b1, b2).T
+
+
+class OrbitCoaster:
+    """Onboard two-body propagator: holds the last GNSS fix and coasts through outages (no J2/drag)."""
+
+    MU = 3.986004418e14
+
+    def __init__(self, max_step_s: float = 10.0):
+        self.max_step, self.t, self.r, self.v = max_step_s, None, None, None
+
+    def _acc(self, r):
+        return -self.MU * r / np.linalg.norm(r) ** 3
+
+    def update(self, t: float, r, v):
+        if r is not None and v is not None:
+            self.t, self.r, self.v = t, np.asarray(r, float), np.asarray(v, float)
+        elif self.t is not None:
+            remaining = t - self.t
+            while remaining > 1e-9:
+                h = min(self.max_step, remaining)
+                k1r, k1v = self.v, self._acc(self.r)
+                k2r, k2v = self.v + 0.5 * h * k1v, self._acc(self.r + 0.5 * h * k1r)
+                k3r, k3v = self.v + 0.5 * h * k2v, self._acc(self.r + 0.5 * h * k2r)
+                k4r, k4v = self.v + h * k3v, self._acc(self.r + h * k3r)
+                self.r = self.r + h / 6 * (k1r + 2 * k2r + 2 * k3r + k4r)
+                self.v = self.v + h / 6 * (k1v + 2 * k2v + 2 * k3v + k4v)
+                remaining -= h
+            self.t = t
+        return self.r, self.v
 
 
 class AdcsMode(str, Enum):
@@ -184,6 +214,7 @@ class AdcsController:
         self._last_dipole = np.zeros(3)
         self._integral = np.zeros(3)
         self._dt = 0.0
+        self.coaster = OrbitCoaster()
 
     def _null_bias_torque(self, speeds: np.ndarray) -> np.ndarray:
         """Torque along the pyramid null space that holds a zero-net-momentum speed bias.
@@ -286,6 +317,8 @@ class AdcsController:
 
     def update(self, u: AdcsInputs) -> tuple[ActuatorCommand, AdcsStatus]:
         cfg = self.config
+        r_nav, v_nav = self.coaster.update(u.t_s, u.r_gcrs_m, u.v_gcrs_m_s)
+        u = dataclasses.replace(u, r_gcrs_m=r_nav, v_gcrs_m_s=v_nav)
         used = self._estimate(u)
         gyro = np.zeros(3) if u.gyro_rad_s is None else np.asarray(u.gyro_rad_s, dtype=float)
         omega = self.ekf.rate(gyro) if self.ekf.initialised else gyro

@@ -135,6 +135,8 @@ class GnssConfig:
     velocity_sigma_m_s: float = 0.1
     position_correlation_s: float = 10.0
     velocity_correlation_s: float = 2.0
+    outage_windows_s: tuple = ()          # ((start, end), ...) signal loss; fix returns after reacquisition_s
+    reacquisition_s: float = 16.0         # Orion B-16 published reacquisition dwell
 
 
 class GnssNoiseModel:
@@ -142,7 +144,7 @@ class GnssNoiseModel:
 
     def __init__(self, config: GnssConfig | None = None, seed: int = 0):
         self.config, self.rng = config or GnssConfig(), np.random.default_rng(seed)
-        self._pos = self._vel = None
+        self._pos = self._vel = self._r_meas = None
         self._last_t: float | None = None
 
     @staticmethod
@@ -153,8 +155,15 @@ class GnssNoiseModel:
         phi = math.exp(-dt / tau)
         return phi * prev + math.sqrt(1 - phi * phi) * innovation
 
-    def measure(self, t: float, r: np.ndarray, v: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def available(self, t: float) -> bool:
+        return not any(a <= t < b + self.config.reacquisition_s for a, b in self.config.outage_windows_s)
+
+    def measure(self, t: float, r: np.ndarray, v: np.ndarray):
+        """Returns (r, v), or (None, None) while there is no fix."""
         c = self.config
+        if not self.available(t):
+            self._pos = self._vel = self._r_meas = self._last_t = None
+            return None, None
         dt = 1.0 if self._last_t is None else max(t - self._last_t, 1e-9)
         if self._last_t is not None and dt < 1.0 - 1e-9:      # 1 Hz receiver: hold the last fix
             return self._r_meas, self._v_meas

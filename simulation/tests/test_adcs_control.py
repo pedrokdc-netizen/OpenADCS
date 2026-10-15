@@ -83,6 +83,20 @@ def test_gnss_noise_statistics_and_closed_loop_with_noisy_gnss(run):
     assert sim.gnss is not None          # the shared run above uses noisy GNSS by default
 
 
+def test_gnss_outage_is_coasted_through():
+    from openadcs_sim.closed_loop import GnssConfig, GnssNoiseModel
+    gnss = GnssNoiseModel(GnssConfig(outage_windows_s=((100, 200),), reacquisition_s=16), seed=1)
+    r, v = np.array([6.878e6, 0, 0]), np.array([0, 7.6e3, 0])
+    assert gnss.measure(50.0, r, v)[0] is not None
+    assert gnss.measure(150.0, r, v)[0] is None
+    assert gnss.measure(210.0, r, v)[0] is None          # still reacquiring
+    assert gnss.measure(217.0, r, v)[0] is not None
+    sim = make(gnss=GnssConfig(outage_windows_s=((1500, 2500),)))
+    result = sim.run(3200)
+    assert np.percentile(result.pointing_error_deg[1000:], 95) < 2.5
+    assert result.pointing_error_deg[1500:2600].max() < 3.0
+
+
 def test_wheel_unloading_reduces_momentum():
     sim = make(initial_wheel_speeds_rad_s=(0.0, 700.0, 0.0, 0.0), initial_rate_rad_s=(0, 0, 0),
                initial_attitude_offset_rad=(0, 0, 0))
