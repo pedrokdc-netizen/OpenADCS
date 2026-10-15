@@ -71,6 +71,18 @@ def test_wheels_stay_unsaturated_and_biased(run):
     assert result.wheel_momentum_nms[600:].max() < 0.4 * sim.wheels.spec.max_momentum_nms
 
 
+def test_gnss_noise_statistics_and_closed_loop_with_noisy_gnss(run):
+    from openadcs_sim.closed_loop import GnssNoiseModel
+    gnss = GnssNoiseModel(seed=3)
+    r, v = np.array([6.878e6, 0, 0]), np.array([0, 7.6e3, 0])
+    errors = np.array([gnss.measure(float(t), r, v)[0] - r for t in range(4000)])
+    assert errors.std(axis=0)[0] == pytest.approx(3.0, rel=0.3)      # vertical (radial) sigma
+    assert errors.std(axis=0)[1] == pytest.approx(2.0 / np.sqrt(2 * np.log(2)), rel=0.3)
+    assert np.abs(errors).max() > 0
+    sim, result = run
+    assert sim.gnss is not None          # the shared run above uses noisy GNSS by default
+
+
 def test_wheel_unloading_reduces_momentum():
     sim = make(initial_wheel_speeds_rad_s=(0.0, 700.0, 0.0, 0.0), initial_rate_rad_s=(0, 0, 0),
                initial_attitude_offset_rad=(0, 0, 0))

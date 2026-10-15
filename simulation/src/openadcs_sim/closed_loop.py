@@ -127,6 +127,51 @@ def default_magnetometer(seed: int = 2) -> MagnetometerModel:
         full_scale_t=1e-3, seed=seed))
 
 
+@dataclass(frozen=True)
+class GnssConfig:
+    """Orion B-16 style PVT errors (values of examples/orion_b16_assumptions.json; ASSUMPTIONS)."""
+    horizontal_cep_m: float = 2.0
+    vertical_sigma_m: float = 3.0
+    velocity_sigma_m_s: float = 0.1
+    position_correlation_s: float = 10.0
+    velocity_correlation_s: float = 2.0
+
+
+class GnssNoiseModel:
+    """First-order Gauss-Markov position/velocity errors in the local radial/along/cross frame, GCRS output."""
+
+    def __init__(self, config: GnssConfig | None = None, seed: int = 0):
+        self.config, self.rng = config or GnssConfig(), np.random.default_rng(seed)
+        self._pos = self._vel = None
+        self._last_t: float | None = None
+
+    @staticmethod
+    def _step(prev, sigma, tau, dt, rng):
+        innovation = sigma * rng.normal(size=3)
+        if prev is None or tau <= 0:
+            return innovation
+        phi = math.exp(-dt / tau)
+        return phi * prev + math.sqrt(1 - phi * phi) * innovation
+
+    def measure(self, t: float, r: np.ndarray, v: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        c = self.config
+        dt = 1.0 if self._last_t is None else max(t - self._last_t, 1e-9)
+        if self._last_t is not None and dt < 1.0 - 1e-9:      # 1 Hz receiver: hold the last fix
+            return self._r_meas, self._v_meas
+        self._last_t = t
+        horizontal = c.horizontal_cep_m / math.sqrt(2 * math.log(2))
+        self._pos = self._step(self._pos, np.array([c.vertical_sigma_m, horizontal, horizontal]),
+                               c.position_correlation_s, dt, self.rng)
+        self._vel = self._step(self._vel, np.full(3, c.velocity_sigma_m_s), c.velocity_correlation_s, dt, self.rng)
+        up = r / np.linalg.norm(r)
+        cross = np.cross(r, v)
+        cross /= np.linalg.norm(cross)
+        along = np.cross(cross, up)
+        frame = np.column_stack((up, along, cross))
+        self._r_meas, self._v_meas = r + frame @ self._pos, v + frame @ self._vel
+        return self._r_meas, self._v_meas
+
+
 @dataclass
 class ClosedLoopResult:
     t_s: np.ndarray
@@ -153,7 +198,8 @@ class ClosedLoopSimulation:
     def __init__(self, env: Environment, spacecraft: SpacecraftConfig, epoch: datetime | None = None,
                  dt_s: float = 1.0, wheels: ReactionWheelArray | None = None, adcs_config: AdcsConfig | None = None,
                  initial_rate_rad_s=(0.0, 0.0, 0.0), initial_attitude_offset_rad=(0.0, 0.0, 0.0),
-                 initial_wheel_speeds_rad_s=None, seed: int = 0, use_horizon: bool = True):
+                 initial_wheel_speeds_rad_s=None, seed: int = 0, use_horizon: bool = True,
+                 gnss: GnssConfig | None = GnssConfig()):
         self.env, self.dt = env, dt_s
         self.epoch = epoch or datetime(2026, 1, 1, tzinfo=timezone.utc)
         self.wheels = wheels or ReactionWheelArray()
@@ -167,6 +213,7 @@ class ClosedLoopSimulation:
             initial_rate_body_rad_s=initial_rate_rad_s, initial_attitude_offset_rad=initial_attitude_offset_rad,
             initial_wheel_speeds_rad_s=initial_wheel_speeds_rad_s)
         self.gyro, self.mag = default_gyro(seed + 1), default_magnetometer(seed + 2)
+        self.gnss = GnssNoiseModel(gnss, seed + 4) if gnss is not None else None   # None = ideal GNSS
         self.sun_sensor = SunSensorArray()
         self.horizon = HorizonSensorModel(HorizonSensorConfig(mode="law"), seed=seed + 3) if use_horizon else None
 
@@ -183,13 +230,15 @@ class ClosedLoopSimulation:
             if reading is not None and reading.valid:
                 nadir = reading.n_body
                 nadir_sigma = math.sqrt(max(np.trace(reading.cov_roll_pitch_rad2) / 2, 1e-8))
+        r_nav, v_nav = (env.r_gcrs_m, env.v_gcrs_m_s) if self.gnss is None else self.gnss.measure(
+            t, env.r_gcrs_m, env.v_gcrs_m_s)
         return AdcsInputs(
             t_s=t, gyro_rad_s=gyro.rate_sensor_rad_s if gyro.valid else None,
             mag_body_t=mag.field_sensor_t if mag.valid else None,
             sun_body=sun.fused.sun_body if sun.fused.valid else None,
             sun_sigma_rad=max(float(sun.fused.sigma_rad), math.radians(0.3)) if sun.fused.valid else 0.01,
             sunlit=env.sunlit, nadir_body=nadir, nadir_sigma_rad=nadir_sigma,
-            wheel_speeds_rad_s=truth.wheel_speeds_rad_s, r_gcrs_m=env.r_gcrs_m, v_gcrs_m_s=env.v_gcrs_m_s,
+            wheel_speeds_rad_s=truth.wheel_speeds_rad_s,             r_gcrs_m=r_nav, v_gcrs_m_s=v_nav,
             b_ref_gcrs_t=env.b_gcrs_t, sun_ref_gcrs=env.sun_gcrs)
 
     def run(self, duration_s: float, progress: Callable[[float], None] | None = None) -> ClosedLoopResult:
