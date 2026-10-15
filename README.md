@@ -45,6 +45,37 @@ user-approved exception (like the GPS and magnetometer models).
   per head and 0.071 deg fused (ground, open sky); these are reference figures only.
 - The flown slit/PSD processing in `onboard/src/sun_sensor.c` is unchanged.
 
+### Six-head OV5640 cube array (`openadcs_sim/sun_sensor_array.py`)
+
+Six OV5640 heads, one per cube face (boresights +/-X, +/-Y, +/-Z), use the head model above with
+the OV5640 geometry (2592x1944 px, 1.4 um pixel, `ov5640_cube_heads` in `black_sun_sensor.py`).
+
+- **Environment:** `EnvironmentSimulator(..., sun_sensor=SunSensorArray(...))` computes, per
+  sample, the body-frame Sun vector (ideal nadir attitude unless `attitude_model` is given), the
+  cylindrical-shadow eclipse flag and the six head readings. `EnvironmentSample.sun_sensor`
+  holds per-head status/centroid, the fused body vector, the number of valid heads and the fused
+  error in degrees. The JSON gains an optional `sun_sensor` key (schema 1 stays additive); the
+  CSV gains `sun_sensor_*` columns only when the sensor ran. CLI: `--sun-sensor`,
+  `--sun-sensor-sigma-px` (default 0.1), `--sun-sensor-diagonal-fov-deg` (default 120).
+- **GUI:** the Sun tab has a "Sun sensor (OV5640)" panel: body az/el coverage map (number of
+  heads seeing each direction, Sun marked), a per-head status table with the fused vector and
+  error, and a fused-error history (eclipse shaded, valid-head count). The centroid-error entry
+  re-evaluates the selected time; "Compute history" runs the whole recorded run in a background
+  thread (decimated to the chosen step). The panel recomputes from the selected sample and the
+  entered sigma; it does not require `--sun-sensor`.
+- **Results (baseline 500 km / 98.5 deg orbit, one orbit, 20 s steps, sunlit samples):**
+  coverage of the sphere 100 %, 18.8 % of directions seen by 2+ heads, at most 3 heads at once;
+  fused error RMS / p95 = 0.007 / 0.013 deg at 0.1 px, 0.021 / 0.038 deg at 0.3 px,
+  0.069 / 0.126 deg at 1.0 px. Eclipse: no valid heads, no estimate (by design).
+- **Assumptions to confirm:** the "120 deg" module is taken as the DIAGONAL FOV (horizontal is
+  then about 108 deg, vertical about 92 deg); with the standard 68.7 deg lens coverage drops to
+  about 35 %. The 0.1 px centroid error is a placeholder, not a datasheet figure. The reported
+  error is therefore optimistic: not modeled are lens distortion, off-axis pixel scale, rolling
+  shutter, saturation/ND filtering, glare and Earth albedo, thermal drift, radiation and
+  autofocus. Nothing here is flight validated.
+- Not yet connected: ADCS ingress (architecture block `Sun sensor (6x OV5640 cube)` is PARTIAL),
+  the C99 fusion, and torque-driven attitude (the body attitude is the ideal nadir view).
+
 ## Magnetometer digital model (assumption-based)
 
 Benchmark of existing magnetometer models (primary sources checked 2026-10-11):
@@ -181,8 +212,7 @@ is faster or more accurate than the alternatives.
 
 ## Attitude determination and sensor qualification
 
-The requested sensor suite comprises coarse Sun sensors (with a field of view),
-fine Sun sensors, an IMU, a horizon sensor and GPS. **Flight-derived Sun/gyro
+The requested sensor suite comprises a six-head OV5640 cube Sun sensor (which replaces the coarse and fine Sun sensors), an IMU, a horizon sensor and GPS. **Flight-derived Sun/gyro
 processing and an explicitly assumed Orion B-16 PVT behavioral model are
 implemented; attitude estimation remains disabled.** General qualification
 requires documented in-orbit use of
@@ -330,8 +360,8 @@ alone.
 
 | Requested sensor | Best inspected reference | Current disposition |
 | --- | --- | --- |
-| Coarse Sun sensor with FOV | Basilisk `coarseSunSensor` | Dropped from the system design: the six-head black-sun camera arrangement (360� coverage) replaces it |
-| Fine Sun sensor | ESTCube-1 directional slit/PSD Sun processing | Independent directional Sun processing implemented; no validated fine-sensor noise profile or accuracy specification |
+| Coarse Sun sensor with FOV | Basilisk `coarseSunSensor` | Dropped from the system design: the six-head black-sun camera arrangement replaces it (modelled as six OV5640 cube heads, 120 deg diagonal-FOV variant: 100% sphere coverage, see above) |
+| Fine Sun sensor | ESTCube-1 directional slit/PSD Sun processing | Removed from the system architecture (Phase 2): superseded by the six-head OV5640 cube Sun sensor. The legacy C99 `onboard/src/sun_sensor.c` is kept in the repository but is not part of the architecture |
 | IMU | ESTCube-1 gyro calibration; Basilisk `imuSensor`; AcubeSAT gyro-noise studies | Independent gyro correction implemented; full IMU and stochastic/environment model remain deferred |
 | Horizon sensor | `gotenham/infraredHorizonSensor` prototype | Deferred: inspected tests use a simulated orbital view, not orbital flight; AcubeSAT `GHorizon.m` is geometry, not an instrument |
 | GPS | User-selected NavSpark/SkyTraq Orion B-16 | Datasheet-based PVT behavioral model and C99 binary navigation ingress implemented under explicitly authorized assumptions; not flight-calibrated or a clone of receiver firmware |
@@ -558,6 +588,43 @@ one-second navigation-message interval even when internal PVT updates are
 faster. Actual hardware command configuration and serial transport remain
 separate future work. The existing GUI does not yet show GPS receiver results.
 
+## Sun sensor albedo
+
+Each OV5640 head receives Earth-reflected light computed from the exact sphere-to-plane view factor (Lambertian Earth, Bond albedo 0.30, scaled by the Sun zenith at the sub-satellite point; zero on the night side). The centroid is pulled toward the Earth-lit direction by `leak x (E_albedo/E_sun) x pixel offset` (ASSUMPTION: leak 0.002, no characterisation data). CLI: `--albedo` (0 disables), `--albedo-leak`; GUI: Sun tab fields. Over one 500 km / 98.5 deg orbit the fused RMS rises from 0.006 to 0.007 deg (leak 0.002) or 0.020 deg (leak 0.01). Eclipse already marks every head `ECLIPSE`. Not modelled: penumbra, regional albedo, specular glint.
+
+## Sun sensor calibration inputs and envelope validation
+
+Baseline (GUI and default simulation): 120 deg DIAGONAL FOV pinhole (vendor f = 1.78 mm, aperture 2 mm), principal point at the image centre, centroid sigma 0.1 px, centroid bias 0, dropout 0, heads perfectly aligned. Open point: f = 1.78 mm at 1.4 um/px is 1271 px, which as a pinhole gives 103.8 deg diagonal, not 120 deg (the model uses f = 935 px for 120 deg); the lens is a fisheye, so a real projection and distortion model needs hardware calibration. `centroid_bias_px` is the residual constant centroid offset left after calibration (a systematic error that averaging cannot remove). Head misalignment is modelled per head (`mount_sigma_deg` Gaussian per axis or explicit `mount_errors_deg`): the head physically sits misaligned while the estimator assumes the nominal cube axes.
+
+Envelope run: `python -m openadcs_sim.sun_sensor_envelope --output report.json` evaluates the baseline, all 2^6 low/high corners of (sigma, bias x/y, albedo leak, albedo, FOV) with and without the +-2 deg mount bound (128 corners) plus Gaussian Monte Carlo. All extreme ranges are PLACEHOLDERS (`EnvelopeSpec`). First result (placeholder ranges, 200 Sun directions): baseline RMS 0.011 deg; worst corner 2.7 deg, dominated by the 2 deg misalignment.
+
+## Spacecraft definition (mass properties input)
+
+`Spacecraft > Define spacecraft...` (or **Define...** in the Spacecraft box) opens a separate window to edit the name, mass, centre of mass and the 3x3 inertia tensor about the centre of mass. Entries are in CAD units (g, mm, g mm^2); the SolidWorks "positive tensor" convention (off-diagonals are products of inertia) is handled by a checkbox. **Apply** sets the spacecraft used by the GUI, **Save/Load JSON** use SI (`mass_kg`, `com_m`, `inertia_kg_m2`). The baseline is `simulation/data/spacecraft/pilot1_v2.json` (Pilot1_V2: 500 g, principal moments 8.775e-4 / 2.072e-3 / 2.483e-3 kg m^2). The CLI accepts `--spacecraft file.json` (validated), and the JSON export embeds the spacecraft. Assumption: the CAD output axes are the body axes. The Dynamics model will consume this configuration.
+## Attitude dynamics (torque-driven truth)
+
+`simulation/src/openadcs_sim/dynamics.py` integrates the rigid-body equations (quaternion body to GCRS, body rate, RK4, 2 s max step) with the inertia from the spacecraft JSON. Torques: gravity gradient plus an `external_torque(t, q, omega_B)` hook where the actuator and disturbance models will plug in. It implements `AttitudeModel`, so it replaces the ideal nadir reference when enabled: GUI checkbox "Torque-driven attitude (dynamics)" in the Spacecraft box, or `python -m openadcs_sim.cli --dynamics [--initial-rate WX WY WZ]`. The start state is nadir-pointing at the orbit rate. Scrubbing backwards restarts from stored checkpoints.
+
+Status: PARTIAL. No actuator, aerodynamic, solar-radiation or residual-magnetic torques and no specific-force output yet. Note: the Pilot1 V2 inertia (Iz largest) is gravity-gradient unstable about nadir, so with dynamics enabled it drifts away from nadir without control.
+## Actuators (reaction wheels and magnetorquers)
+
+`openadcs_sim.actuators` provides a 4-wheel pyramid (54.74 deg skew, isotropic) of custom 10 g wheels and 3 orthogonal magnetorquers, integrated by DynamicsAttitudeModel (wheels=, magnetorquers=, controller=, magnetic_field=).
+
+- Wheel: J_w w_dot = u - tau_friction, torque and speed limited (smooth taper near the speed limit), Coulomb + viscous friction. Body: I w_dot = tau - w x (I w + h_w) - A J_w w_dot; total momentum is conserved (tested).
+- The 10 g wheel is an **assumed** scaling of the Sinclair RW-0.003 (50 g, 1 mNm, 3 mNms, 8500 rpm): geometry scaled by (m/50 g)^(1/3), inertia and torque by (m/50 g)^(5/3) -> about 0.069 mNm and 0.21 mNms; friction terms are assumed fractions of the torque limit.
+- Magnetorquer: 	au = m x B_body, per-axis dipole limit 0.2 A m^2 (**assumed**, generic CubeSat value); dot_dipole gives the B-dot detumble law.
+- Not modelled yet: wheel imbalance, back-EMF, torque ripple, current loop, core hysteresis. The ADCS control law is described next.
+
+## ADCS (estimation and control)
+
+`openadcs_sim.adcs_control` (Python reference, C99 port NOT done) and `openadcs_sim.closed_loop` (test harness: truth dynamics + sensor models + ADCS, 1 Hz).
+
+- **Estimator**: a 6-state multiplicative EKF (attitude error + gyro bias), gyro propagation, vector updates from the Sun sensor (sunlit), horizon nadir (eclipse; "law" mode) and magnetometer. TRIAD initialises it from any pair 15-165 deg apart. A UKF or IMM was not needed: measurement dropouts (eclipse, Sun loss) are handled by gating, and the measured error is small.
+- **Modes**: DETUMBLE (B-dot, `m = k w x B`, wheels idle) -> ACQUISITION (wheel rate damping) -> NOMINAL (nadir-pointing PD + integral, gyroscopic and orbit-rate feed-forward, wheel friction feed-forward).
+- **Wheels / magnetorquers**: wheels do all pointing; magnetorquers (`m = B x tau / |B|^2`, GNSS position + field model for B_ref) unload wheel momentum with hysteresis, and are switched off one cycle in five so the magnetometer reads clean. A zero-net-momentum null-space bias (about 250 rad/s per wheel) keeps wheels away from zero speed, where friction sign changes made them stall.
+- **Measured (analytic 500 km / 51.6 deg environment, Pilot1 inertia, 0.05 rad/s initial tumble, large initial attitude error)**: detumble in minutes; after 1000 s pointing error median 0.28 deg in sunlight (max 1 deg) and 0.7 deg in eclipse (max 2 deg), limited by the estimator.
+- **Assumptions (optimistic)**: ideal GNSS (true r, v), exact inertia and wheel friction known to the ADCS, "law" horizon model (not flight proven), no magnetorquer interference on the magnetometer, no wheel/torquer imperfections, `RealEnvironment` (SGP4 + XYZgeomag + Huira, baseline TLE, 3500 s) checked once manually: pointing median 0.5 deg, max 2.3 deg, ~47 % sunlit; not covered by a test. Gyro and magnetometer baselines are assumptions.
+
 ## Ground simulation
 
 The ground simulator lives in `simulation/` and prioritizes accuracy, inspectability,
@@ -636,7 +703,8 @@ samples, play forward/reverse, pause, or jump to the end. The default **60x** sp
 advances 60 simulation seconds per real second; choose a preset, enter any finite
 positive multiplier, or use **Slower/Faster**. Dragging the timeline pauses playback.
 One UTC cursor synchronizes the spacecraft views, ground-track/altitude and
-trajectory markers, magnetic/Sun plot cursors, and sample readouts.
+trajectory markers, magnetic/Sun plot cursors, and sample readouts. The **Sun** tab also
+shows the OV5640 cube Sun-sensor panel (coverage, per-head status, fused error).
 
 Playback uses actual recorded timestamps and monotonic wall time, not rendering
 frame counts. The displayed state is the recorded sample at or immediately before

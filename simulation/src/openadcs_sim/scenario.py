@@ -32,6 +32,28 @@ def training_tle() -> str:
     return "SYNTHETIC LEO - classroom exercise only\n" + "\n".join(checked)
 
 
+def _tle_checksum(content: str) -> int:
+    return sum(int(char) if char.isdigit() else int(char == "-") for char in content) % 10
+
+
+def baseline_tle(altitude_km: float = 500.0, inclination_deg: float = 98.5, raan_deg: float = 172.5) -> str:
+    """Synthetic circular baseline orbit (500 km, 98.5 deg).  NOT exactly sun-synchronous.
+
+    The RAAN gives a ~10:30 ascending node at the 2026-10-09 epoch; 98.5 deg is ~1 deg above the
+    sun-synchronous inclination for 500 km (~97.4 deg), so the node drifts ~0.15 deg/day relative
+    to the Sun.  The mean motion is the Keplerian value (SGP4's Kozai mean motion differs by <0.1%).
+    """
+    mu = 398600.4418
+    semi_major = 6378.137 + altitude_km
+    revs_per_day = 86400.0 / (2.0 * math.pi * math.sqrt(semi_major ** 3 / mu))
+    lines = (
+        "1 99998U 26001B   26282.50000000  .00000000  00000-0  00000-0 0  0001",
+        f"2 99998 {inclination_deg:8.4f} {raan_deg:8.4f} 0001000   0.0000   0.0000 {revs_per_day:11.8f}    01",
+    )
+    checked = [line[:68] + str(_tle_checksum(line[:68])) for line in lines]
+    return f"BASELINE {altitude_km:.0f} km {inclination_deg:.1f} deg - synthetic\n" + "\n".join(checked)
+
+
 def parse_tle(text: str) -> tuple[str, str]:
     lines = text.strip("\r\n").splitlines()
     if len(lines) == 3 and not lines[0].startswith("1 "):
@@ -131,6 +153,16 @@ def sample_readout(sample: EnvironmentSample) -> Readout:
     )
 
 
+def _decode_sun_sensor(record):
+    if record is None:
+        return None
+    from .sun_sensor_array import SunSensorMeasurement
+    try:
+        return SunSensorMeasurement.from_dict(record)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Simulation worker returned an invalid Sun-sensor record.") from error
+
+
 def decode_sample(line: str) -> EnvironmentSample:
     record = json.loads(line)
     if not isinstance(record, dict) or record.get("schema_version") != 1 or record.get("frame") != "ITRS":
@@ -149,30 +181,47 @@ def decode_sample(line: str) -> EnvironmentSample:
         utc_time(datetime.fromisoformat(record["time_utc"])),
         vector3(record["position_m"]), vector3(record["velocity_m_s"]),
         vector3(record["magnetic_field_t"]), direction, distance,
+        sun_sensor=_decode_sun_sensor(record.get("sun_sensor")),
     )
+
+
+def _sun_sensor_columns(sample: EnvironmentSample) -> list:
+    measurement = sample.sun_sensor
+    if measurement is None:
+        return [""] * 5
+    fused = measurement.fused.sun_body.tolist() if measurement.fused.valid else [""] * 3
+    error = measurement.error_deg
+    return [measurement.valid_heads, *fused, "" if error is None else error]
 
 
 def export_results(
     destination: Path, scenario: Scenario, samples: Sequence[EnvironmentSample], status: str,
+    spacecraft=None,
 ) -> None:
     if not samples:
         raise ValueError("There are no samples to export.")
     if destination.suffix.lower() == ".json":
         with destination.open("w", encoding="utf-8") as output:
+            document = {"schema_version": 1, "status": status, "scenario": scenario.to_dict(),
+                        "samples": [sample.to_dict() for sample in samples]}
+            if spacecraft is not None:
+                document["spacecraft"] = spacecraft.to_dict()
             json.dump(
-                {"schema_version": 1, "status": status, "scenario": scenario.to_dict(),
-                 "samples": [sample.to_dict() for sample in samples]},
+                document,
                 output, indent=2, allow_nan=False,
             )
             output.write("\n")
     elif destination.suffix.lower() == ".csv":
         with destination.open("w", newline="", encoding="utf-8") as output:
             writer = csv.writer(output)
+            with_sensor = any(sample.sun_sensor is not None for sample in samples)
             writer.writerow([
                 "time_utc", "frame", "run_status", "latitude_deg", "longitude_deg", "altitude_km",
                 "x_km", "y_km", "z_km", "vx_fixed_km_s", "vy_fixed_km_s", "vz_fixed_km_s",
                 "bx_ut", "by_ut", "bz_ut", "b_magnitude_ut",
                 "sun_x_unit", "sun_y_unit", "sun_z_unit", "sun_distance_au",
+                *(("sun_sensor_valid_heads", "sun_sensor_fused_x_body", "sun_sensor_fused_y_body",
+                   "sun_sensor_fused_z_body", "sun_sensor_error_deg") if with_sensor else ()),
             ])
             for sample in samples:
                 readout = sample_readout(sample)
@@ -182,6 +231,7 @@ def export_results(
                     *(sample.position_itrs_m / 1000), *(sample.velocity_itrs_m_s / 1000),
                     *(sample.magnetic_field_itrs_t * 1e6), readout.magnetic_magnitude_ut,
                     *sample.sun_direction_itrs, readout.sun_distance_au,
+                    *(_sun_sensor_columns(sample) if with_sensor else ()),
                 ])
     else:
         raise ValueError("Choose a .csv or .json export file.")

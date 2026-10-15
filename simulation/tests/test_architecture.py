@@ -12,13 +12,13 @@ PLACEHOLDERS = [placeholder for module in MODULES for placeholder in module.plac
 def test_catalog_covers_required_modules_and_reports_actual_capabilities():
     modules = {module.id: module for module in MODULES}
     assert len(modules) == len(MODULES)
-    assert {"orbit", "magnetic", "sun", "conditions", "dynamics",     "fine", "mag",
-            "gyro", "horizon", "gps", "adcs", "obc", "actuators"} == set(modules)
+    assert {"orbit", "magnetic", "sun", "conditions", "dynamics", "mag", "sunsensor",
+            "gyro", "horizon", "gps", "adcs", "obc", "actuators", "spacecraft"} == set(modules)
     assert modules["gps"].status is ModuleStatus.IMPLEMENTED
     assert modules["gyro"].status is ModuleStatus.IMPLEMENTED
-    for key in ("fine", "adcs", "conditions", "horizon"):
+    for key in ("sunsensor", "adcs", "conditions", "horizon", "dynamics", "actuators"):
         assert modules[key].status is ModuleStatus.PARTIAL
-    for key in ("obc", "actuators", "dynamics"):
+    for key in ("obc",):
         assert modules[key].status is ModuleStatus.PLACEHOLDER
     for module in MODULES:
         assert module.inputs and module.outputs and module.source_paths
@@ -60,8 +60,8 @@ def test_connections_have_unique_endpoints_and_bounded_orthogonal_routes():
 def test_reference_truth_is_not_presented_as_measured_attitude_or_live_control():
     connections = {connection.id: connection for connection in CONNECTIONS}
     assert "NOT a measurement" in connections["magnetic_reference"].variables
-    assert connections["magnetic_reference"].planned
+    assert not connections["magnetic_reference"].planned
     assert "ECEF PVT" in connections["gps_adcs"].variables
     assert not connections["gps_adcs"].planned
-    assert connections["adcs_actuators"].planned
-    assert connections["actuators_dynamics"].planned
+    assert not connections["adcs_actuators"].planned
+    assert not connections["actuators_dynamics"].planned

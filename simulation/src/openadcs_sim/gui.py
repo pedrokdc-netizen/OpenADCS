@@ -10,7 +10,8 @@ from .environment import EnvironmentSample
 from .gui_runner import FinishedEvent, RunWorker, SampleEvent
 from .orbit import SGP4Propagator
 from .playback import PlaybackClock
-from .scenario import KERNEL_NAMES, Readout, Scenario, export_results, parse_tle, sampling_count, training_tle
+from .scenario import KERNEL_NAMES, Readout, Scenario, export_results, parse_tle, sampling_count, training_tle, baseline_tle
+from .spacecraft import pilot1_baseline
 
 GUIDE = """QUICK START
 1. Import a satellite TLE (.tle or .txt), or paste its two element lines.
@@ -132,6 +133,9 @@ class SimulationApp:
         self.summary = [tk.StringVar(value="--") for _ in range(4)]
         self.details = tk.StringVar(value="Run a simulation to inspect a sample.")
         self.input_widgets: list[tk.Widget] = []
+        self.spacecraft = pilot1_baseline()
+        self.spacecraft_window = None
+        self.spacecraft_info = tk.StringVar(value=f"{self.spacecraft.name} | {self.spacecraft.mass_kg * 1000:g} g")
 
         style = ttk.Style(root)
         if "clam" in style.theme_names():
@@ -192,7 +196,10 @@ class SimulationApp:
         self._build_window_menu()
         self._build_animation_toolbar(shell)
         bottom = ttk.Frame(shell)
-        bottom.pack(fill=tk.X, pady=(12, 0))
+        # Bottom-anchored widgets are packed before the expanding body so they are never clipped.
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=(12, 0), before=body)
+        animation = next(w for w in shell.winfo_children() if str(w.cget("text") if "text" in w.keys() else "") .startswith("Animation"))
+        animation.pack_configure(side=tk.BOTTOM, before=body)
         self.progress = ttk.Progressbar(bottom, mode="determinate", maximum=100)
         self.progress.pack(fill=tk.X)
         ttk.Label(bottom, textvariable=self.status_value, wraplength=1200).pack(anchor=tk.W, pady=(5, 0))
@@ -222,7 +229,35 @@ class SimulationApp:
         self.close_view_menu_index = self.window_menu.index(tk.END)
         self.window_menu.configure(postcommand=self.update_window_menu)
         menu.add_cascade(label="Window", menu=self.window_menu)
+        spacecraft_menu = tk.Menu(menu, tearoff=False)
+        spacecraft_menu.add_command(label="Define spacecraft...", command=self.open_spacecraft_window)
+        menu.add_cascade(label="Spacecraft", menu=spacecraft_menu)
         self.root.configure(menu=menu)
+
+    def open_spacecraft_window(self) -> None:
+        from .spacecraft_window import SpacecraftWindow
+
+        window = self.spacecraft_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.show(self.spacecraft)
+            return
+        self.spacecraft_window = SpacecraftWindow(self.root, self.spacecraft, self.set_spacecraft)
+
+    def set_spacecraft(self, config) -> None:
+        self.spacecraft = config
+        self.spacecraft_info.set(f"{config.name} | {config.mass_kg * 1000:g} g")
+        self.apply_attitude_model()
+
+    def apply_attitude_model(self) -> None:
+        """Ideal nadir reference, or rigid-body dynamics (gravity gradient) with the current spacecraft inertia."""
+        if self.dynamics_enabled.get():
+            from .dynamics import DynamicsAttitudeModel
+            self.plotter.attitude_model = DynamicsAttitudeModel(self.spacecraft)
+        else:
+            self.plotter.attitude_model = None
+        self.plotter.refresh_active()
 
     def toggle_view(self, key: str) -> None:
         self.plotter.set_visible(key, self.view_enabled[key].get())
@@ -391,12 +426,20 @@ class SimulationApp:
         return button
 
     def _build_controls(self, parent: ttk.Frame) -> None:
+        craft_frame = ttk.LabelFrame(parent, text="Spacecraft", padding=10)
+        craft_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(craft_frame, textvariable=self.spacecraft_info, wraplength=240).pack(side=tk.LEFT)
+        ttk.Button(craft_frame, text="Define...", command=self.open_spacecraft_window).pack(side=tk.RIGHT)
+        self.dynamics_enabled = tk.BooleanVar(value=False)
+        ttk.Checkbutton(craft_frame, text="Torque-driven attitude (dynamics)", variable=self.dynamics_enabled,
+                        command=self.apply_attitude_model).pack(side=tk.BOTTOM, anchor=tk.W)
         tle_frame = ttk.LabelFrame(parent, text="1  Satellite orbit", padding=10)
         tle_frame.pack(fill=tk.X)
         row = ttk.Frame(tle_frame)
         row.pack(fill=tk.X)
         self._button(row, "Import TLE file...", self.import_tle).pack(side=tk.LEFT)
         self._button(row, "Load synthetic LEO", self.load_training).pack(side=tk.RIGHT)
+        self._button(row, "Load baseline 500 km / 98.5 deg", self.load_baseline).pack(side=tk.RIGHT, padx=(0, 6))
         ttk.Label(tle_frame, text="Paste TLE lines below; the satellite name is optional.", wraplength=340).pack(anchor=tk.W, pady=6)
         self.tle_text = tk.Text(tle_frame, height=5, width=42, wrap=tk.NONE, font=("Consolas", 9), undo=True)
         self.tle_text.pack(fill=tk.X)
@@ -511,6 +554,12 @@ class SimulationApp:
         self.tle_text.insert("1.0", training_tle())
         self.use_epoch()
         self.status_value.set("Synthetic classroom orbit loaded. NOT an observed or operational satellite.")
+
+    def load_baseline(self) -> None:
+        self.tle_text.delete("1.0", tk.END)
+        self.tle_text.insert("1.0", baseline_tle())
+        self.use_epoch()
+        self.status_value.set("Baseline 500 km / 98.5 deg circular orbit loaded (synthetic, not exactly sun-synchronous).")
 
     def browse_kernels(self) -> None:
         directory = filedialog.askdirectory(parent=self.root, title="Choose NAIF kernel folder")
@@ -716,7 +765,7 @@ class SimulationApp:
         if not filename:
             return
         try:
-            export_results(Path(filename), self.result_scenario, self.samples, self.result_status)
+            export_results(Path(filename), self.result_scenario, self.samples, self.result_status, self.spacecraft)
         except (OSError, ValueError) as error:
             messagebox.showerror("Export failed", str(error), parent=self.root)
             return

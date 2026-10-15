@@ -59,7 +59,7 @@ def app(tk_root):
 
 
 def test_gui_defaults_and_training_controls(app):
-    assert len(app.notebook.tabs()) == 10
+    assert len(app.notebook.tabs()) == 11
     assert str(app.stop_button["state"]) == "disabled"
     assert str(app.csv_button["state"]) == "disabled"
     assert "571 samples" in app.schedule_info.get()
@@ -119,7 +119,7 @@ def test_architecture_zoom_fit_and_selection(app):
     panel.select_connection("gps_adcs")
     assert "ECEF PVT" in panel.details.get("1.0", tk.END)
     assert "Available API or offline path" in panel.details.get("1.0", tk.END)
-    panel.select_connection("adcs_actuators")
+    panel.select_connection("obc_adcs")
     assert "PLANNED / not connected" in panel.details.get("1.0", tk.END)
     panel.module_choice.current(next(index for index, module in enumerate(MODULES) if module.id == "obc"))
     panel._choose_module(None)
@@ -454,3 +454,55 @@ def test_gui_runs_real_physics_and_restores_controls(app, monkeypatch):
     assert app.plotter.selected_sample is app.samples[0]
     app.inspect_sample("3")
     assert app.plotter.selected_sample is app.samples[3]
+
+
+def test_horizon_tab_and_baseline_button(recorded_app):
+    app = recorded_app
+    assert 'horizon' in app.plotter.tabs
+    app.load_baseline()
+    assert 'BASELINE' in app.tle_text.get('1.0', tk.END)
+    app.notebook.select(app.plotter.tabs['horizon'])
+    app.root.update()
+    app.plotter.render_selected(app.samples[1])
+    panel = app.plotter.horizon_panel
+    assert panel.sample is app.samples[1]
+    assert len(panel.figure.axes) >= 3
+
+
+def test_sun_tab_has_ov5640_panel(recorded_app):
+    app = recorded_app
+    app.notebook.select(app.plotter.tabs['sun'])
+    app.root.update()
+    app.plotter.render_selected(app.samples[2])
+    panel = app.plotter.sun_sensor_panel
+    assert panel.sample is app.samples[2]
+    assert len(panel.figure.axes) >= 3
+    panel.sigma.set('0.5')
+    panel.compute_history()
+    for _ in range(200):
+        app.root.update()
+        if panel.history is not None:
+            break
+        time.sleep(0.05)
+    assert panel.history is not None
+    panel.sigma.set('abc')
+    assert panel.sensor_config().centroid_sigma_px == 0.1
+
+
+def test_spacecraft_window_edit_apply_and_load(app, tmp_path):
+    from openadcs_sim.spacecraft import SpacecraftConfig, pilot1_baseline
+
+    app.open_spacecraft_window()
+    window = app.spacecraft_window
+    assert app.spacecraft.mass_kg == pytest.approx(0.5)
+    window.mass.set("750")
+    assert window.apply().mass_kg == pytest.approx(0.75)
+    assert app.spacecraft.mass_kg == pytest.approx(0.75)
+    window.mass.set("abc")
+    assert window.apply() is None and window.message.get()
+    path = tmp_path / "craft.json"
+    pilot1_baseline().save(path)
+    assert window.load_path(path)
+    assert app.spacecraft.mass_kg == pytest.approx(0.5)
+    assert window.mass.get() == "500"
+    window.destroy()

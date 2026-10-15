@@ -19,6 +19,7 @@ VIEW_TITLES = {
     "trajectory": "3D trajectory",
     "magnetic": "Magnetics",
     "sun": "Sun",
+    "horizon": "Horizon sensor",
     "architecture": "System architecture",
 }
 
@@ -55,6 +56,17 @@ class PlotPanel:
                 self.architecture_panel = ArchitecturePanel(frame)
                 self.architecture_panel.pack(fill=tk.BOTH, expand=True)
                 continue
+            if key == "horizon":
+                from .horizon_view import HorizonPanel
+
+                self.horizon_panel = HorizonPanel(frame, self._horizon_view)
+                self.horizon_panel.pack(fill=tk.BOTH, expand=True)
+                continue
+            if key == "sun":
+                from .sun_sensor_view import SunSensorPanel
+
+                self.sun_sensor_panel = SunSensorPanel(frame, self._horizon_view)
+                self.sun_sensor_panel.pack(side=tk.BOTTOM, fill=tk.X)
             figure = Figure(figsize=(7, 4.5), dpi=100,
                             layout=None if key in ("spacecraft", "earth") else "constrained")
             canvas = FigureCanvasTkAgg(figure, master=frame)
@@ -73,6 +85,9 @@ class PlotPanel:
         self.earth_tab = self.tabs["earth"]
         notebook.bind("<<NotebookTabChanged>>", lambda _: self.refresh_active(), add="+")
         self.clear()
+
+    def _horizon_view(self, sample: EnvironmentSample) -> BodyView:
+        return spacecraft_view(sample, self.attitude_model)   # no shared cache: also called from a thread
 
     def active_view(self) -> str | None:
         selected = self.notebook.select()
@@ -93,6 +108,12 @@ class PlotPanel:
         key = self.active_view()
         if key is None or key == "architecture":
             return
+        if key == "horizon":
+            if self.selected_sample is not None:
+                self.horizon_panel.show_sample(self.selected_sample)
+            return
+        if key == "sun" and self.selected_sample is not None:
+            self.sun_sensor_panel.show_sample(self.selected_sample)
         if self.selected_sample is not None and key in ("spacecraft", "earth"):
             if self._rendered_samples.get(key) is not self.selected_sample:
                 if self._body_sample is not self.selected_sample:
@@ -136,6 +157,8 @@ class PlotPanel:
         self._rendered_samples.clear()
         self.markers.clear()
         self.start_time = None
+        self.horizon_panel.clear()
+        self.sun_sensor_panel.clear()
         for key, figure in self.view_figures.items():
             figure.clear()
             body = key in ("spacecraft", "earth")
@@ -155,6 +178,8 @@ class PlotPanel:
             self.clear()
             return
         self.start_time = samples[0].time_utc
+        self.horizon_panel.set_samples(samples)
+        self.sun_sensor_panel.set_samples(samples)
         indices = np.unique(np.linspace(0, len(samples) - 1, min(len(samples), 3000), dtype=int))
         chosen = [samples[index] for index in indices]
         derived = [readouts[index] for index in indices]

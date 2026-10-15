@@ -190,6 +190,15 @@ class HorizonSensorConfig:
                              min(1.0, (proc + readout) / period))
 
 
+@dataclass(frozen=True)
+class SceneEnvironment:
+    """Optional truth that enables Sun, season, day/night and housing-temperature effects."""
+    sun_body: np.ndarray | None = None
+    declination_deg: float = 0.0
+    sun_distance_au: float = 1.0
+    housing_delta_k: float = 0.0
+
+
 @dataclass
 class HorizonCameraResult:
     index: int
@@ -197,6 +206,7 @@ class HorizonCameraResult:
     n_points: int
     arc_deg: float
     rms_rad: float
+    sun_masked_px: int = 0         # pixels excluded around a saturated Sun blob
 
 
 @dataclass
@@ -211,6 +221,30 @@ class HorizonReading:
     architecture: HorizonArchitecture
     cameras: list[HorizonCameraResult] = field(default_factory=list)
     gamma_deg: float = float("nan")
+
+
+SUN_EXCLUSION_DEG = 10.0     # ASSUMPTION: radius masked around a saturated Sun blob (core + glare)
+
+
+def sun_exclusion_mask(frame: np.ndarray, camera: CameraConfig, dead_mask=None,
+                       radius_deg: float = SUN_EXCLUSION_DEG) -> np.ndarray | None:
+    """Pixels within ``radius_deg`` of saturated blobs smaller than the Earth disc (None: no Sun).
+
+    Earth limb pixels never reach the sensor ceiling (the warm Earth is ~285 K), so a pixel at the
+    ceiling is a Sun hit; the mask is the dilated blob (plus the dead-pixel mask).
+    """
+    saturated = frame >= camera.ceiling_k - 1.0
+    if dead_mask is not None:
+        saturated = saturated & ~dead_mask
+    if not saturated.any():
+        return None
+    radius = max(1, int(round(math.radians(radius_deg) / camera.ifov_rad)))
+    mask = np.zeros_like(saturated)
+    for y, x in zip(*np.nonzero(saturated)):
+        y0, y1, x0, x1 = max(0, y - radius), y + radius + 1, max(0, x - radius), x + radius + 1
+        yy, xx = np.ogrid[y0:min(y1, saturated.shape[0]), x0:min(x1, saturated.shape[1])]
+        mask[y0:y1, x0:x1] |= (yy - y) ** 2 + (xx - x) ** 2 <= radius ** 2
+    return mask
 
 
 # ----------------------------------------------------------------------------- math helpers
@@ -290,10 +324,11 @@ class HorizonSensorModel:
     # ------------------------------------------------------------------ public
     def step(self, t_s: float, n_body_true: np.ndarray, r_km: float, latitude_deg: float,
              heading_deg: float = 0.0, rate_dps: float = 0.0,
-             n_prior_body: np.ndarray | None = None) -> HorizonReading | None:
+             n_prior_body: np.ndarray | None = None, scene: SceneEnvironment | None = None
+             ) -> HorizonReading | None:
         if t_s + 1e-12 >= self._next_capture_s:
             reading = self._capture(t_s, np.asarray(n_body_true, dtype=float), r_km, latitude_deg,
-                                    heading_deg, rate_dps, n_prior_body)
+                                    heading_deg, rate_dps, n_prior_body, scene)
             self._pending.append(reading)
             period = self.timing.output_period_s
             self._next_capture_s = max(self._next_capture_s + period, t_s + 1e-9)
@@ -303,13 +338,14 @@ class HorizonSensorModel:
         return delivered
 
     def measure_now(self, n_body_true, r_km, latitude_deg, heading_deg=0.0, rate_dps=0.0,
-                    n_prior_body=None, t_s: float = 0.0) -> HorizonReading:
+                    n_prior_body=None, t_s: float = 0.0, scene: SceneEnvironment | None = None
+                    ) -> HorizonReading:
         """Process one capture immediately (no rate limiting) - used by the Monte Carlo runs."""
         return self._capture(t_s, np.asarray(n_body_true, dtype=float), r_km, latitude_deg,
-                             heading_deg, rate_dps, n_prior_body)
+                             heading_deg, rate_dps, n_prior_body, scene)
 
     # ------------------------------------------------------------------ internals
-    def _capture(self, t_s, n_true, r_km, lat, heading, rate_dps, n_prior_body) -> HorizonReading:
+    def _capture(self, t_s, n_true, r_km, lat, heading, rate_dps, n_prior_body, scene=None) -> HorizonReading:
         timing = self.timing
         sample_t = t_s
         available = t_s + timing.latency_s
@@ -318,7 +354,7 @@ class HorizonSensorModel:
         if self.config.mode == "law":
             return self._law_reading(sample_t, available, n_true, t_s, lat)
         return self._image_reading(sample_t, available, n_true, r_km, lat, heading, rate_dps,
-                                   n_prior_body)
+                                   n_prior_body, scene)
 
     def _invalid(self, sample_t, available, status, cams=None) -> HorizonReading:
         return HorizonReading(sample_t, available, False, status, np.array([0.0, 0.0, 1.0]),
@@ -341,21 +377,27 @@ class HorizonSensorModel:
         return HorizonReading(sample_t, available, True, "OK", nadir_from_roll_pitch(*rp), np.degrees(rp),
                               np.diag(sig ** 2), self.config.architecture)
 
-    def _render(self, index, n_true, r_km, lat, heading, rate_dps, atm_real, atm_cfg):
+    def _render(self, index, n_true, r_km, lat, heading, rate_dps, atm_real, atm_cfg, scene=None):
         cfg = self.config
-        truth = SceneTruth(n_true, r_km, lat, heading)
+        if scene is None:
+            truth = SceneTruth(n_true, r_km, lat, heading)
+        else:
+            truth = SceneTruth(n_true, r_km, lat, heading, scene.sun_body, scene.declination_deg,
+                               scene.sun_distance_au)
         radiance = render_radiance(cfg.camera, cfg.mounts[index], truth, atm_real, atm_cfg, self.rng)
-        return self.units[index].read_frame(radiance, self.rng, math.radians(abs(rate_dps)))
+        delta = 0.0 if scene is None else scene.housing_delta_k
+        return self.units[index].read_frame(radiance, self.rng, math.radians(abs(rate_dps)), delta)
 
     def _image_reading(self, sample_t, available, n_true, r_km, lat, heading, rate_dps,
-                       n_prior_body) -> HorizonReading:
+                       n_prior_body, scene=None) -> HorizonReading:
         cfg = self.config
         atm_cfg = cfg.atmosphere
         atm_real = AtmosphereRealization(atm_cfg, self.rng)
         prior_b = np.array([0.0, 0.0, 1.0]) if n_prior_body is None else np.asarray(n_prior_body, float)
         prior_b = prior_b / np.linalg.norm(prior_b)
-        frames = [self._render(i, n_true, r_km, lat, heading, rate_dps, atm_real, atm_cfg)
+        frames = [self._render(i, n_true, r_km, lat, heading, rate_dps, atm_real, atm_cfg, scene)
                   for i in range(cfg.n_cameras)]
+        self.last_frames = frames
         return process_frames(frames, cfg, prior_b, r_km, lat, heading, sample_t, available,
                               [u.dead_mask for u in self.units])
 
@@ -370,9 +412,15 @@ def process_frames(frames: list[np.ndarray], cfg: HorizonSensorConfig, prior_b: 
                    dtype=np.float64) -> HorizonReading:
     """ADCS-side + ESP32-side processing of already captured frames -> one HorizonReading."""
     pc = cfg.processing
-    dead_masks = dead_masks or [None] * len(frames)
+    dead_masks = list(dead_masks or [None] * len(frames))
     arch = cfg.architecture
     results: list[HorizonCameraResult] = []
+    sun_masked = [0] * len(frames)
+    for i, frame in enumerate(frames):
+        sun = sun_exclusion_mask(frame, cfg.camera, dead_masks[i])
+        if sun is not None:
+            sun_masked[i] = int(sun.sum())
+            dead_masks[i] = sun if dead_masks[i] is None else (dead_masks[i] | sun)
 
     def cam_prior(i):
         rot = cfg.mounts[i].rotation_body_from_cam()
@@ -385,7 +433,7 @@ def process_frames(frames: list[np.ndarray], cfg: HorizonSensorConfig, prior_b: 
             rays, offsets, points, status = gather_limb_rays(
                 frame, cfg.camera, pc, n_c, gamma, dtype, dead_masks[i], r_km,
                 (cfg.mounts[i].azimuth_deg, cfg.mounts[i].off_nadir_deg))
-            results.append(HorizonCameraResult(i, status, len(rays), 0.0, float("nan")))
+            results.append(HorizonCameraResult(i, status, len(rays), 0.0, float("nan"), sun_masked[i]))
             if status == "OK":
                 all_rays.append(rays @ rot.T)
                 all_off.append(offsets if offsets is not None else np.zeros(len(rays)))
@@ -414,7 +462,7 @@ def process_frames(frames: list[np.ndarray], cfg: HorizonSensorConfig, prior_b: 
         rot, n_c, gamma = cam_prior(i)
         fit, _ = estimate_nadir(frame, cfg.camera, pc, n_c, gamma, dtype, dead_masks[i], r_km,
                                 (cfg.mounts[i].azimuth_deg, cfg.mounts[i].off_nadir_deg))
-        results.append(HorizonCameraResult(i, fit.status, fit.n_points, fit.arc_deg, fit.rms_rad))
+        results.append(HorizonCameraResult(i, fit.status, fit.n_points, fit.arc_deg, fit.rms_rad, sun_masked[i]))
         if fit.valid:
             estimates.append((rot @ fit.n_cam, rot @ fit.basis, fit.cov_tangent[:2, :2]))
     if not estimates:
