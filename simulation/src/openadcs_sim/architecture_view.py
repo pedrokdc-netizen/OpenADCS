@@ -12,22 +12,24 @@ PALETTE = {
 }
 SHORT_TITLES = {
     "orbit": "Orbit", "magnetic": "Magnetics", "sun": "Sun",
-    "conditions": "Env inputs", "dynamics": "Dynamics",
-    "fine": "Fine Sun", "gyro": "Gyro", "horizon": "Horizon", "gps": "GPS / GNSS", "mag": "TAM",
+    "conditions": "Env inputs", "dynamics": "Dynamics", "spacecraft": "S/C config",
+    "sunsensor": "Sun cam x6", "gyro": "Gyro", "horizon": "Horizon", "gps": "GPS / GNSS", "mag": "TAM",
     "adcs": "ADCS MCU", "obc": "OBC MCU", "actuators": "Actuators",
 }
 SHORT_VARIABLES = {
-    "orbit_gps": "r, v, UTC", "sun_fine": "s_ITRS",
+    "sun_sunsensor": "s_ITRS", "sunsensor_adcs": "fused s_body",
+    "orbit_gps": "r, v, UTC",
     "dynamics_gyro": "omega_B",
     "orbit_horizon": "r_ITRS", "dynamics_horizon": "R_BG",
     "conditions_gps": "SV / RF / DOP", "conditions_sensors": "sunlit / albedo",
     "conditions_gyro": "T", "magnetic_reference": "B_ref",
-    "sun_reference": "s_ref", "fine_adcs": "s_body", "gyro_adcs": "omega_B",
+    "sun_reference": "s_ref", "gyro_adcs": "omega_B",
     "horizon_adcs": "nadir_body", "gps_adcs": "ECEF PVT",
     "adcs_obc": "health / estimate", "obc_adcs": "mode / target / clock",
     "adcs_actuators": "torque_cmd", "actuators_dynamics": "torque_body",
     "orbit_magnetic": "r, UTC", "orbit_sun": "r, UTC",
-    "dynamics_fine": "R_BG",
+    "dynamics_sunsensor": "R_BG",
+    "spacecraft_dynamics": "m, I_B",
     "magnetic_mag": "B_ref -> B_body", "dynamics_mag": "R_BG", "mag_adcs": "B_meas",
 }
 

@@ -96,3 +96,15 @@ def test_fusion_reduces_error_and_ignores_invalid_heads():
     assert not fuse_heads([bad]).valid
     good = BlackSunHeadModel(make_config(centroid_sigma_px=0.5)).sample(0.0, truth)
     assert fuse_heads([bad, good]).valid
+
+
+def test_ov5640_cube_preset_geometry_and_coverage():
+    from openadcs_sim.black_sun_sensor import ov5640_cube_heads, ov5640_head_config
+    config = ov5640_head_config(np.eye(3), diagonal_fov_deg=68.7)
+    assert config.image_size_px == (2592, 1944)
+    assert abs(config.half_fov_deg - 34.35) < 1e-9
+    heads = ov5640_cube_heads(centroid_sigma_px=0.0, diagonal_fov_deg=68.7)
+    assert len(heads) == 6
+    for k, axis in enumerate([(0, 0, 1), (0, 0, -1), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)]):
+        reading = heads[k].sample(0.0, axis)
+        assert reading.valid and np.allclose(reading.centroid_px, (1296.0, 972.0))

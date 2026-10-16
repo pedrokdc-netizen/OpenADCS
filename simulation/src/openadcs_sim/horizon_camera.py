@@ -33,7 +33,7 @@ _C2 = 1.4387769e4     # um K
 
 def _band_tables():
     wavelengths = np.linspace(LWIR_BAND_UM[0], LWIR_BAND_UM[1], 301)
-    temps = np.arange(120.0, 420.0001, 0.25)
+    temps = np.arange(120.0, 520.0001, 0.25)
     planck = _C1 / (wavelengths[None, :] ** 5 * np.expm1(_C2 / (wavelengths[None, :] * temps[:, None])))
     integrate = getattr(np, "trapezoid", None) or np.trapz
     radiance = integrate(planck, wavelengths, axis=1)
@@ -41,6 +41,23 @@ def _band_tables():
 
 
 _T_TABLE, _L_TABLE = _band_tables()
+SUN_TEMPERATURE_K = 5772.0
+SUN_RADIUS_KM = 695700.0
+AU_KM = 149597870.7
+
+
+def sun_band_irradiance(distance_au: float = 1.0) -> float:
+    """In-band (8-14 um) solar irradiance [W m-2] at the spacecraft (blackbody Sun, 5772 K)."""
+    wavelengths = np.linspace(LWIR_BAND_UM[0], LWIR_BAND_UM[1], 301)
+    planck = _C1 / (wavelengths ** 5 * np.expm1(_C2 / (wavelengths * SUN_TEMPERATURE_K)))
+    integrate = getattr(np, "trapezoid", None) or np.trapz
+    radiance = float(integrate(planck, wavelengths))
+    solid_angle = math.pi * (SUN_RADIUS_KM / (distance_au * AU_KM)) ** 2
+    return radiance * solid_angle
+
+
+def sun_angular_radius_rad(distance_au: float = 1.0) -> float:
+    return math.asin(SUN_RADIUS_KM / (distance_au * AU_KM))
 
 
 def band_radiance(temperature_k):
@@ -87,6 +104,17 @@ class CameraConfig:
     quantization_k: float = 0.1      # ASSUMPTION: 0.1 K output step
     thermal_time_constant_s: float = 0.012   # ASSUMPTION: typical microbolometer 10-15 ms
     noise_reference_k: float = 303.15        # datasheet noise table is at ~30 C scene
+    netd_k: float | None = None              # fixed per-frame NETD [K] at the reference scene; None: MI0802 table
+    # Sun in the field of view.  The Sun is a point source (0.27 deg radius, ~0.5 px) whose in-band
+    # irradiance saturates the pixels it falls on; the scatter terms are ASSUMPTIONS (no lens data).
+    sun_scatter_core_fraction: float = 0.02  # ASSUMPTION: share of the solar flux scattered into a halo
+    sun_scatter_core_deg: float = 3.0        # ASSUMPTION
+    sun_scatter_wide_fraction: float = 0.005 # ASSUMPTION
+    sun_scatter_wide_deg: float = 15.0       # ASSUMPTION
+    # Housing temperature: factory NUC is valid at ``housing_reference_k``; away from it the offset drifts.
+    housing_reference_k: float = 293.15      # ASSUMPTION
+    offset_drift_k_per_k: float = 0.05       # ASSUMPTION: apparent scene offset per kelvin of housing change
+    fpn_growth_per_k: float = 0.02           # ASSUMPTION: relative FPN growth per kelvin of housing change
 
     def __post_init__(self):
         if self.width < 8 or self.height < 8 or self.supersample < 1:
@@ -118,8 +146,11 @@ class CameraConfig:
 
     def noise_sigma_k(self, scene_k=None):
         """Temporal noise per output frame [K] (datasheet log-interpolated, /sqrt(N) averaging)."""
-        sigma = float(np.exp(np.interp(math.log(self.fps), np.log([1.0, 10.0, 30.0]),
-                                       np.log([0.2, 0.63, 1.09]))))
+        if self.netd_k is not None:
+            sigma = float(self.netd_k)
+        else:
+            sigma = float(np.exp(np.interp(math.log(self.fps), np.log([1.0, 10.0, 30.0]),
+                                           np.log([0.2, 0.63, 1.09]))))
         sigma /= math.sqrt(self.frames_averaged)
         if scene_k is None:
             return sigma
@@ -156,7 +187,14 @@ class AtmosphereConfig:
     cloud_mean_k: float = 8.0           # mean cloud-top depression, ASSUMPTION
     cloud_sigma_k: float = 12.0
     texture_sigma_k: float = 2.0
+    # Used only when the scene carries Sun information (``SceneTruth.sun_body``):
+    seasonal_polar_k: float = 12.0      # ASSUMPTION: winter pole colder / summer pole warmer by this at 90 deg
+    night_drop_k: float = 4.0           # ASSUMPTION: night-side limb radiance temperature drop
+    terminator_width: float = 0.15      # sin(elevation) half-width of the day/night transition
     enabled: bool = True
+
+
+OBLIQUITY_DEG = 23.44
 
 
 @dataclass(frozen=True)
@@ -165,12 +203,20 @@ class SceneTruth:
     r_km: float             # geocentric distance of the spacecraft
     latitude_deg: float
     heading_deg: float = 0.0
+    sun_body: np.ndarray | None = None   # unit vector spacecraft -> Sun, body frame (None: no Sun effects)
+    declination_deg: float = 0.0         # solar declination (season); only used with ``sun_body``
+    sun_distance_au: float = 1.0
 
     def __post_init__(self):
         n = np.asarray(self.n_body, dtype=float)
         if n.shape != (3,) or abs(np.linalg.norm(n) - 1.0) > 1e-6:
             raise ValueError("n_body must be a unit 3-vector")
         object.__setattr__(self, "n_body", n)
+        if self.sun_body is not None:
+            s = np.asarray(self.sun_body, dtype=float)
+            if s.shape != (3,) or abs(np.linalg.norm(s) - 1.0) > 1e-6:
+                raise ValueError("sun_body must be a unit 3-vector")
+            object.__setattr__(self, "sun_body", s)
         if self.r_km <= EARTH_A_KM * (1 - EARTH_F) + 100:
             raise ValueError("r_km is below any supported orbit")
 
@@ -282,6 +328,18 @@ def render_radiance(config: CameraConfig, mount: CameraMount, truth: SceneTruth,
         + math.cos(math.radians(truth.latitude_deg)) * math.sin(math.acos(min(1.0, EARTH_A_KM / r)))
         * np.cos(math.radians(truth.heading_deg) + clock), -1, 1))
     earth_k = atm_config.warm_temperature_k - atm_config.polar_drop_k * np.sin(lat_t) ** 2 - cloud
+    if truth.sun_body is not None:
+        # season: the winter pole is colder, the summer pole warmer
+        winter = -np.sign(lat_t) * math.sin(math.radians(truth.declination_deg)) / math.sin(
+            math.radians(OBLIQUITY_DEG))
+        earth_k = earth_k - atm_config.seasonal_polar_k * winter * np.sin(lat_t) ** 2
+        # day/night: sun elevation at the tangent point
+        lam = math.acos(min(1.0, EARTH_A_KM / r))
+        tangent_dir = (-math.cos(lam) * n[None, None, :]
+                       + math.sin(lam) * (np.cos(clock)[..., None] * e1 + np.sin(clock)[..., None] * e2))
+        sin_elevation = tangent_dir @ truth.sun_body
+        night = 1.0 / (1.0 + np.exp(np.clip(sin_elevation / atm_config.terminator_width, -60, 60)))
+        earth_k = earth_k - atm_config.night_drop_k * night
     if atm_config.enabled:
         earth_k = earth_k + atm_config.texture_sigma_k * rng.normal(size=earth_k.shape)
     earth_k = np.clip(earth_k, 150.0, 330.0)
@@ -289,7 +347,64 @@ def render_radiance(config: CameraConfig, mount: CameraMount, truth: SceneTruth,
     radiance = fraction * band_radiance(earth_k) + (1 - fraction) * band_radiance(3.0)
     blurred = convolve_separable(radiance, _gaussian_kernel(config.psf_sigma_px * s))
     h, w = config.height, config.width
-    return blurred.reshape(h, s, w, s).mean(axis=(1, 3))
+    image = blurred.reshape(h, s, w, s).mean(axis=(1, 3))
+    if truth.sun_body is not None:
+        image = image + sun_radiance_image(config, mount, truth)
+    return image
+
+
+def sun_visibility(truth: SceneTruth) -> float:
+    """1 when the Sun disc is fully visible from the spacecraft, 0 when occulted by the Earth."""
+    if truth.sun_body is None:
+        return 0.0
+    earth_angle = math.asin(min(1.0, EARTH_A_KM / truth.r_km))
+    nadir_angle = math.acos(float(np.clip(truth.sun_body @ truth.n_body, -1.0, 1.0)))
+    disc = sun_angular_radius_rad(truth.sun_distance_au)
+    return float(np.clip((nadir_angle - earth_angle) / (2.0 * disc) + 0.5, 0.0, 1.0))
+
+
+def sun_camera_direction(mount: CameraMount, sun_body: np.ndarray) -> np.ndarray:
+    return mount.rotation_body_from_cam().T @ np.asarray(sun_body, dtype=float)
+
+
+def sun_pixel(config: CameraConfig, sun_cam: np.ndarray) -> tuple[float, float] | None:
+    """Pinhole projection of the Sun direction (None when it is behind the image plane)."""
+    if sun_cam[2] <= 0.05:
+        return None
+    cx, cy = config.principal_point
+    return cx + config.focal_px * sun_cam[0] / sun_cam[2], cy + config.focal_px * sun_cam[1] / sun_cam[2]
+
+
+def sun_in_fov(config: CameraConfig, sun_cam: np.ndarray, margin_px: float = 0.0) -> bool:
+    pixel = sun_pixel(config, sun_cam)
+    return (pixel is not None and -margin_px <= pixel[0] <= config.width - 1 + margin_px
+            and -margin_px <= pixel[1] <= config.height - 1 + margin_px)
+
+
+def sun_radiance_image(config: CameraConfig, mount: CameraMount, truth: SceneTruth) -> np.ndarray:
+    """Equivalent in-band radiance [W m-2 sr-1] of the Sun's PSF core and optical scatter per pixel.
+
+    A pixel illuminated by solar irradiance E through a normalised point-spread function psi
+    [sr-1] reads like an extended source of radiance E*psi, so the (sub-pixel) Sun disc simply
+    adds ``E * psi(theta)``.  Out-of-field Suns still add the scatter terms (stray light).
+    """
+    visibility = sun_visibility(truth)
+    if visibility <= 0.0:
+        return 0.0
+    sun_cam = sun_camera_direction(mount, truth.sun_body)
+    if sun_cam[2] <= -0.2:
+        return 0.0
+    rays = pixel_rays(config, 1)
+    theta = np.arccos(np.clip(rays @ sun_cam, -1.0, 1.0))
+
+    def gaussian(sigma):
+        return np.exp(-0.5 * (theta / sigma) ** 2) / (2.0 * math.pi * sigma ** 2)
+
+    f1, f2 = config.sun_scatter_core_fraction, config.sun_scatter_wide_fraction
+    psi = ((1.0 - f1 - f2) * gaussian(config.psf_sigma_px * config.ifov_rad)
+           + f1 * gaussian(math.radians(config.sun_scatter_core_deg))
+           + f2 * gaussian(math.radians(config.sun_scatter_wide_deg)))
+    return visibility * sun_band_irradiance(truth.sun_distance_au) * psi
 
 
 @dataclass
@@ -309,8 +424,12 @@ class CameraUnit:
         self.dead_value_k = rng.uniform(self.config.floor_k, 330.0, shape)
 
     def read_frame(self, radiance: np.ndarray, rng: np.random.Generator,
-                   body_rate_rad_s: float = 0.0) -> np.ndarray:
-        """Radiance -> sensor output [K]: smear, floor clip, noise, FPN, dead pixels, quantisation."""
+                   body_rate_rad_s: float = 0.0, housing_delta_k: float = 0.0) -> np.ndarray:
+        """Radiance -> sensor output [K]: smear, floor clip, noise, FPN, dead pixels, quantisation.
+
+        ``housing_delta_k`` is the camera housing temperature minus the NUC reference: it adds an
+        apparent scene offset and grows the fixed-pattern noise (ASSUMED linear coefficients).
+        """
         cfg = self.config
         if body_rate_rad_s > 0:
             smear_px = body_rate_rad_s * cfg.thermal_time_constant_s / cfg.ifov_rad
@@ -319,7 +438,9 @@ class CameraUnit:
                 # isotropic extra blur (conservative for a rate that is unknown in direction)
                 radiance = convolve_separable(radiance, _gaussian_kernel(max(smear_px / 2.0, 0.2)))
         temp = np.clip(band_temperature(radiance), cfg.floor_k, cfg.ceiling_k)
-        temp = temp + rng.normal(size=temp.shape) * cfg.noise_sigma_k(temp) + self.fpn_k
+        fpn_scale = 1.0 + cfg.fpn_growth_per_k * abs(housing_delta_k)
+        temp = (temp + rng.normal(size=temp.shape) * cfg.noise_sigma_k(temp) + self.fpn_k * fpn_scale
+                + cfg.offset_drift_k_per_k * housing_delta_k)
         temp = np.where(self.dead_mask, self.dead_value_k, temp)
         temp = np.clip(temp, cfg.floor_k - 3.0, cfg.ceiling_k)
         if cfg.quantization_k > 0:

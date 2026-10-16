@@ -91,3 +91,24 @@ yaw ≈ 0, GM τ = 120 s, timing costs (§8). Yaw is not observable from a horiz
 `test_horizon_golden.py` (ESP32 golden-vector contract, see `onboard/esp32_horizon/README.md`).
 
 Reproduce: `python -m openadcs_sim.horizon_montecarlo --trials 300 --seed 7 --out simulation/docs/horizon_montecarlo.json` (~5 min).
+
+## 11. GUI tab, baseline orbit, Sun / eclipse / season effects (this revision)
+
+- **GUI**: *Window > Horizon sensor*. Shows the simulated IR frames of the selected time (Sun marker, per-camera
+  status, Sun-mask size), truth vs estimate and the pointing-error history (eclipse shaded, Sun-in-FOV stars,
+  latitude). Architecture, true roll/pitch offset and history step are editable; *Compute history* runs the sensor
+  over the stored run in a background thread. The block diagram now shows orbit/dynamics/Sun feeding the horizon block.
+- **Baseline orbit**: *Load baseline* button / `scenario.baseline_tle()`: 500 km, 98.5 deg, e = 0.0001, node ~10:30.
+  98.5 deg is NOT exactly sun-synchronous at 500 km (~97.4 deg): the node drifts ~0.15 deg/day against the Sun.
+- **Model additions** (`horizon_camera`, `horizon_scene`, `horizon_sensor`): seasonal polar temperature, night-side
+  limb drop, a Sun disc/glare model (5772 K blackbody in 8-14 um, PSF core + two scatter terms), camera-housing
+  temperature state (offset drift + FPN growth) and a saturated-blob Sun mask (10 deg exclusion). Defaults leave the
+  previous scene untouched (golden vectors unchanged).
+- **Observed on one baseline orbit** (independent cameras, 60 s step, attitude offset 2/-1.5 deg): 91 % availability,
+  p95 3.4 deg; eclipse p95 2.7 deg (100 %); latitude >= 60 deg p95 5.3 deg with 70 % availability; the Sun sat in
+  camera 0's FOV for ~5 captures near eclipse exit, where the mask removes camera 0 and the other camera still
+  delivers `OK_SINGLE_CAMERA`.
+- **Not done yet**: the Monte Carlo error laws are still the 97.5 deg ensemble (not regenerated at 98.5 deg); no
+  quality-aware covariance / polar gating yet (polar dropouts are reported as NO estimate, honestly); the Sun
+  scatter, season/night, and housing coefficients are ASSUMPTIONS needing hardware data; camera damage from direct
+  Sun is not modelled.

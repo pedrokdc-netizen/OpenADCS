@@ -1,4 +1,4 @@
-"""PLACEHOLDER: commanded-to-applied torque; actuator hardware is not selected."""
+"""PLACEHOLDER: wheel imbalance, back-EMF, torque ripple, current loop and flight hardware data (see actuators.py)."""
 
 from .base import PlaceholderModule
 
