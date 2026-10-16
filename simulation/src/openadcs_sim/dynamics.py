@@ -23,6 +23,7 @@ from .common import Vector, vector3
 from .spacecraft import SpacecraftConfig
 
 MU_EARTH_M3_S2 = 3.986004418e14
+DisturbanceHook = Callable[[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray], np.ndarray]   # (t, q, omega_B, r, v) -> torque_B
 ExternalTorque = Callable[[float, np.ndarray, np.ndarray], np.ndarray]   # (t_s, q, omega_B) -> torque_B [N m]
 # (t_s, q, omega_B, wheel_speeds, B_body) -> command; B_body is None without a magnetic field model
 Controller = Callable[[float, np.ndarray, np.ndarray, np.ndarray, "np.ndarray | None"], ActuatorCommand]
@@ -87,7 +88,7 @@ class DynamicsAttitudeModel:
                  mu_m3_s2: float = MU_EARTH_M3_S2, wheels: ReactionWheelArray | None = None,
                  magnetorquers: MagnetorquerSet | None = None, controller: Controller | None = None,
                  magnetic_field: MagneticField | None = None, initial_wheel_speeds_rad_s=None,
-                 initial_attitude_offset_rad=(0.0, 0.0, 0.0)):
+                 initial_attitude_offset_rad=(0.0, 0.0, 0.0), disturbance: DisturbanceHook | None = None):
         if not max_step_s > 0:
             raise ValueError("max_step_s must be positive")
         self.spacecraft = spacecraft
@@ -96,6 +97,7 @@ class DynamicsAttitudeModel:
         self.max_step_s = float(max_step_s)
         self.gravity_gradient = gravity_gradient
         self.external_torque = external_torque
+        self.disturbance = disturbance
         self.initial_rate_body = np.array(vector3(initial_rate_body_rad_s))
         self.mu = float(mu_m3_s2)
         self.initial_attitude_offset = np.array(vector3(initial_attitude_offset_rad))   # rotation vector from nadir
@@ -143,7 +145,7 @@ class DynamicsAttitudeModel:
         return magnetic, reaction, speed_dot, dipole
 
     def _torque(self, t: float, q: np.ndarray, omega: np.ndarray, r_gcrs: np.ndarray,
-                wheel_speeds: np.ndarray) -> np.ndarray:
+                wheel_speeds: np.ndarray, v_gcrs: np.ndarray | None = None) -> np.ndarray:
         torque = np.zeros(3)
         if self.gravity_gradient:
             r_body = quaternion_to_matrix(q).T @ r_gcrs
@@ -151,6 +153,8 @@ class DynamicsAttitudeModel:
             torque += 3.0 * self.mu / radius ** 5 * np.cross(r_body, self.inertia @ r_body)
         if self.external_torque is not None:
             torque += np.asarray(self.external_torque(t, q, omega), dtype=float)
+        if self.disturbance is not None and v_gcrs is not None:
+            torque += np.asarray(self.disturbance(t, q, omega, r_gcrs, v_gcrs), dtype=float)
         magnetic, reaction, _, _ = self._actuation(t, q, omega, r_gcrs, wheel_speeds)
         return torque + magnetic + reaction
 
@@ -159,7 +163,7 @@ class DynamicsAttitudeModel:
 
     def _derivative(self, t, y):
         q, omega, r, v, w = y[0:4], y[4:7], y[7:10], y[10:13], y[13:]
-        torque = self._torque(t, q, omega, r, w)
+        torque = self._torque(t, q, omega, r, w, v)
         _, _, speed_dot, _ = self._actuation(t, q, omega, r, w)
         q_dot = 0.5 * quaternion_multiply(q, np.concatenate(([0.0], omega)))
         h_total = self.inertia @ omega + self._wheel_momentum(w)
@@ -216,7 +220,7 @@ class DynamicsAttitudeModel:
                 else:
                     self._times.insert(insert, target)
                     self._checkpoints.insert(insert, entry)
-            torque = self._torque(target, q, omega, position, wheel_speeds)
+            torque = self._torque(target, q, omega, position, wheel_speeds, velocity)
             _, _, _, dipole = self._actuation(target, q, omega, position, wheel_speeds)
             matrix = quaternion_to_matrix(q)
             wheel_momentum = self._wheel_momentum(wheel_speeds)

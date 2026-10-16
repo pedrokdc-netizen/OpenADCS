@@ -16,6 +16,8 @@ import numpy as np
 from .actuators import ActuatorCommand, MagnetorquerSet, ReactionWheelArray
 from .adcs_control import AdcsConfig, AdcsController, AdcsInputs, AdcsMode
 from .attitude import NadirPointingAttitude
+from .conditions import ThermalConfig, ThermalNode, illumination
+from .disturbances import DisturbanceConfig, DisturbanceModel
 from .dynamics import MU_EARTH_M3_S2, DynamicsAttitudeModel, quaternion_to_matrix
 from .gyro_model import GyroConfig, GyroModel
 from .horizon_sensor import HorizonSensorConfig, HorizonSensorModel
@@ -208,7 +210,8 @@ class ClosedLoopSimulation:
                  dt_s: float = 1.0, wheels: ReactionWheelArray | None = None, adcs_config: AdcsConfig | None = None,
                  initial_rate_rad_s=(0.0, 0.0, 0.0), initial_attitude_offset_rad=(0.0, 0.0, 0.0),
                  initial_wheel_speeds_rad_s=None, seed: int = 0, use_horizon: bool = True,
-                 gnss: GnssConfig | None = GnssConfig()):
+                 gnss: GnssConfig | None = GnssConfig(), disturbances: DisturbanceConfig | None = DisturbanceConfig(),
+                 thermal: ThermalConfig | None = None):
         self.env, self.dt = env, dt_s
         self.epoch = epoch or datetime(2026, 1, 1, tzinfo=timezone.utc)
         self.wheels = wheels or ReactionWheelArray()
@@ -216,20 +219,30 @@ class ClosedLoopSimulation:
         self.adcs = AdcsController(self.config)
         self.command = ActuatorCommand()
         self.mtq = MagnetorquerSet(self.config.magnetorquer)
+        self.disturbance_model = DisturbanceModel(disturbances) if disturbances is not None else None   # None = none
         self.dynamics = DynamicsAttitudeModel(
             spacecraft, max_step_s=dt_s, wheels=self.wheels, magnetorquers=self.mtq,
             controller=lambda *args: self.command, magnetic_field=lambda t, r: self.env(t).b_gcrs_t,
             initial_rate_body_rad_s=initial_rate_rad_s, initial_attitude_offset_rad=initial_attitude_offset_rad,
-            initial_wheel_speeds_rad_s=initial_wheel_speeds_rad_s)
+            initial_wheel_speeds_rad_s=initial_wheel_speeds_rad_s, disturbance=self._disturbance_torque)
         self.gyro, self.mag = default_gyro(seed + 1), default_magnetometer(seed + 2)
         self.gnss = GnssNoiseModel(gnss, seed + 4) if gnss is not None else None   # None = ideal GNSS
+        self.thermal = ThermalNode(thermal) if thermal is not None else None   # None = constant 20 C
+        self._temperature_c = 20.0
         self.sun_sensor = SunSensorArray()
         self.horizon = HorizonSensorModel(HorizonSensorConfig(mode="law"), seed=seed + 3) if use_horizon else None
 
+    def _disturbance_torque(self, t, q, omega, r, v):
+        if self.disturbance_model is None:
+            return np.zeros(3)
+        env = self.env(t)
+        return self.disturbance_model.torques(quaternion_to_matrix(q), r, v, env.b_gcrs_t, env.sun_gcrs,
+                                              env.sunlit).total_nm
+
     def _inputs(self, t: float, env: EnvSample, truth) -> AdcsInputs:
         rotation = quaternion_to_matrix(truth.quaternion)
-        gyro = self.gyro.sample(t, truth.omega_body_rad_s, 20.0)
-        mag = self.mag.sample(t, rotation.T @ env.b_gcrs_t, 20.0)
+        gyro = self.gyro.sample(t, truth.omega_body_rad_s, self._temperature_c)
+        mag = self.mag.sample(t, rotation.T @ env.b_gcrs_t, self._temperature_c)
         sun = self.sun_sensor.measure(t, rotation.T @ env.sun_gcrs, env.sunlit)
         nadir, nadir_sigma = None, 0.02
         if self.horizon is not None:
@@ -257,6 +270,8 @@ class ClosedLoopSimulation:
         for k in range(steps):
             t = k * self.dt
             env = self.env(t)
+            if self.thermal is not None:
+                self._temperature_c = self.thermal.step(self.dt, illumination(env.r_gcrs_m, env.sun_gcrs, env.sunlit))
             truth = self.dynamics.propagate(self.epoch + timedelta(seconds=t), env.r_gcrs_m, env.v_gcrs_m_s)
             command, status = self.adcs.update(self._inputs(t, env, truth))
             self.command = command

@@ -7,7 +7,6 @@ from .planned.actuators import ActuatorModel
 from .planned.adcs_mcu import AdcsMicrocontroller
 from .planned.attitude_estimator import AttitudeEstimator
 from .planned.base import PlaceholderModule
-from .planned.dynamics import DisturbanceTorques
 
 from .planned.environment_conditions import EnvironmentConditions
 from .planned.horizon import HorizonSensor
@@ -66,16 +65,17 @@ MODULES = (
            ("r_ITRS [m], UTC",), ("s_ITRS [unit], Sun distance [m]",),
            ("simulation\\src\\openadcs_sim\\sun.py",)),
     Module("conditions", "External environment inputs", ModuleStatus.PARTIAL,
-           "Manual/driver conditions exist; environmental generators are PLACEHOLDER.", (40, 730, 300, 900),
+           "Illumination (solar, albedo, Earth IR) and a lumped thermal node are implemented (conditions.py); GNSS SV/signal/DOP generation is PLACEHOLDER.", (40, 730, 300, 900),
            ("User characterization / hardware inputs",),
-           ("Illumination / T [deg C], GNSS SV/signal/DOP; planned: albedo generation",),
+           ("Illumination [W/m2], T [deg C]; planned: GNSS SV/signal/DOP",),
            ("simulation\\src\\openadcs_sim\\orion_b16.py",
-            "simulation\\src\\openadcs_sim\\sensor_processing.py"), (EnvironmentConditions,)),
-    Module("dynamics", "Spacecraft attitude dynamics", ModuleStatus.PARTIAL,
-           "Rigid-body RK4 + gravity gradient, opt-in (GUI/--dynamics); no actuator/disturbance torques yet.", (40, 1010, 300, 1170),
+            "simulation\\src\\openadcs_sim\\sensor_processing.py", "simulation\\src\\openadcs_sim\\conditions.py"),
+           (EnvironmentConditions,)),
+    Module("dynamics", "Spacecraft attitude dynamics", ModuleStatus.IMPLEMENTED,
+           "Rigid-body RK4 + gravity gradient, aerodynamic drag, SRP, residual dipole, wheels and torquers (GUI/--dynamics opt-in; always on in the closed loop). J2 acts on the onboard orbit coaster.", (40, 1010, 300, 1170),
            ("Applied body torque [N m], mass/inertia, time",),
            ("R_BG (body -> GCRS), omega_B [rad/s], f_B [m/s2]",),
-           ("simulation\\src\\openadcs_sim\\dynamics.py",), (DisturbanceTorques,)),
+           ("simulation\\src\\openadcs_sim\\dynamics.py", "simulation\\src\\openadcs_sim\\disturbances.py")),
     Module("spacecraft", "Spacecraft config", ModuleStatus.IMPLEMENTED,
            "Mass, CoM, inertia (JSON); Pilot1 V2 baseline; GUI editor.",
            (40, 1440, 300, 1590),

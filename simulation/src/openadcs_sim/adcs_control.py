@@ -24,6 +24,7 @@ import numpy as np
 
 from .actuators import ActuatorCommand, MagnetorquerSpec, ReactionWheelArray
 from .attitude import NadirPointingAttitude
+from .disturbances import j2_acceleration
 from .dynamics import matrix_to_quaternion, quaternion_multiply, quaternion_to_matrix
 
 
@@ -67,7 +68,7 @@ class OrbitCoaster:
         self.max_step, self.t, self.r, self.v = max_step_s, None, None, None
 
     def _acc(self, r):
-        return -self.MU * r / np.linalg.norm(r) ** 3
+        return -self.MU * r / np.linalg.norm(r) ** 3 + j2_acceleration(r)
 
     def update(self, t: float, r, v):
         if r is not None and v is not None:
@@ -123,7 +124,7 @@ class AdcsStatus:
 
 
 class AttitudeEKF:
-    def __init__(self, arw_rad_s_rthz: float = 2e-4, bias_rw_rad_s2_rthz: float = 2e-6,
+    def __init__(self, arw_rad_s_rthz: float = 2e-4, bias_rw_rad_s2_rthz: float = 2e-7,
                  initial_attitude_sigma_rad: float = np.radians(5.0), initial_bias_sigma_rad_s: float = 5e-3):
         self.sigma_v, self.sigma_u = arw_rad_s_rthz, bias_rw_rad_s2_rthz
         self.initial_attitude_sigma, self.initial_bias_sigma = initial_attitude_sigma_rad, initial_bias_sigma_rad_s
@@ -195,7 +196,7 @@ class AdcsConfig:
     mag_sigma_rad: float = np.radians(2.0)   # field model + sensor + residual dipole
     unload_enter_fraction: float = 0.25      # of one wheel's momentum capacity (norm of body momentum)
     unload_exit_fraction: float = 0.10
-    unload_time_constant_s: float = 600.0
+    unload_time_constant_s: float = 150.0
     friction_compensation: float = 0.8       # fraction of the modelled wheel friction fed forward
     wheel_bias_rad_s: float = 500.0          # null-space speed bias, ~250 rad/s per wheel (0 disables)
     wheel_bias_time_constant_s: float = 20.0

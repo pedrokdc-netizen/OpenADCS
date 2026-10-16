@@ -16,7 +16,8 @@ def test_catalog_covers_required_modules_and_reports_actual_capabilities():
             "gyro", "horizon", "gps", "adcs", "obc", "actuators", "spacecraft"} == set(modules)
     assert modules["gps"].status is ModuleStatus.IMPLEMENTED
     assert modules["gyro"].status is ModuleStatus.IMPLEMENTED
-    for key in ("sunsensor", "adcs", "conditions", "horizon", "dynamics", "actuators"):
+    assert modules["dynamics"].status is ModuleStatus.IMPLEMENTED
+    for key in ("sunsensor", "adcs", "conditions", "horizon", "actuators"):
         assert modules[key].status is ModuleStatus.PARTIAL
     for key in ("obc",):
         assert modules[key].status is ModuleStatus.PLACEHOLDER
