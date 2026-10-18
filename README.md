@@ -43,7 +43,7 @@ user-approved exception (like the GPS and magnetometer models).
   the stationary Kalman filter, radiation, thermal drift, albedo and Earth glare.
 - No defaults: all parameters are user characterizations. The paper reports about 0.125 deg raw
   per head and 0.071 deg fused (ground, open sky); these are reference figures only.
-- The flown slit/PSD processing in `onboard/src/sun_sensor.c` is unchanged.
+- The legacy flown slit/PSD processing in `onboard/src/sun_sensor.c` is unchanged and kept: it is still built into the processing library (`openadcs_sun_process`) and covered by `test_sensor_processing.py`, but it is not part of the Pilot1 architecture (the OV5640 cube replaces it).
 
 ### Six-head OV5640 cube array (`openadcs_sim/sun_sensor_array.py`)
 
@@ -69,7 +69,7 @@ the OV5640 geometry (2592x1944 px, 1.4 um pixel, `ov5640_cube_heads` in `black_s
   0.069 / 0.126 deg at 1.0 px. Eclipse: no valid heads, no estimate (by design).
 - **Assumptions to confirm:** the "120 deg" module is taken as the DIAGONAL FOV (horizontal is
   then about 108 deg, vertical about 92 deg); with the standard 68.7 deg lens coverage drops to
-  about 35 %. The 0.1 px centroid error is a placeholder, not a datasheet figure. The reported
+  about 35 %. The 120 deg is a user-confirmed hardware target: the vendor f = 1.78 mm gives only 103.8 deg as a pure pinhole, so the 120 deg baseline stands in for the fisheye projection (a fisheye mapping is planned after hardware calibration). The 0.1 px centroid error is a placeholder, not a datasheet figure. The reported
   error is therefore optimistic: not modeled are lens distortion, off-axis pixel scale, rolling
   shutter, saturation/ND filtering, glare and Earth albedo, thermal drift, radiation and
   autofocus. Nothing here is flight validated.
@@ -361,7 +361,7 @@ alone.
 | Requested sensor | Best inspected reference | Current disposition |
 | --- | --- | --- |
 | Coarse Sun sensor with FOV | Basilisk `coarseSunSensor` | Dropped from the system design: the six-head black-sun camera arrangement replaces it (modelled as six OV5640 cube heads, 120 deg diagonal-FOV variant: 100% sphere coverage, see above) |
-| Fine Sun sensor | ESTCube-1 directional slit/PSD Sun processing | Removed from the system architecture (Phase 2): superseded by the six-head OV5640 cube Sun sensor. The legacy C99 `onboard/src/sun_sensor.c` is kept in the repository but is not part of the architecture |
+| Fine Sun sensor | ESTCube-1 directional slit/PSD Sun processing | Removed from the system architecture (Phase 2): superseded by the six-head OV5640 cube Sun sensor. The legacy C99 `onboard/src/sun_sensor.c` is kept (it is built into the processing library and tested) but is not part of the architecture |
 | IMU | ESTCube-1 gyro calibration; Basilisk `imuSensor`; AcubeSAT gyro-noise studies | Independent gyro correction implemented; full IMU and stochastic/environment model remain deferred |
 | Horizon sensor | `gotenham/infraredHorizonSensor` prototype | Deferred: inspected tests use a simulated orbital view, not orbital flight; AcubeSAT `GHorizon.m` is geometry, not an instrument |
 | GPS | User-selected NavSpark/SkyTraq Orion B-16 | Datasheet-based PVT behavioral model and C99 binary navigation ingress implemented under explicitly authorized assumptions; not flight-calibrated or a clone of receiver firmware |
@@ -601,6 +601,44 @@ Envelope run: `python -m openadcs_sim.sun_sensor_envelope --output report.json` 
 ## Spacecraft definition (mass properties input)
 
 `Spacecraft > Define spacecraft...` (or **Define...** in the Spacecraft box) opens a separate window to edit the name, mass, centre of mass and the 3x3 inertia tensor about the centre of mass. Entries are in CAD units (g, mm, g mm^2); the SolidWorks "positive tensor" convention (off-diagonals are products of inertia) is handled by a checkbox. **Apply** sets the spacecraft used by the GUI, **Save/Load JSON** use SI (`mass_kg`, `com_m`, `inertia_kg_m2`). The baseline is `simulation/data/spacecraft/pilot1_v2.json` (Pilot1_V2: 500 g, principal moments 8.775e-4 / 2.072e-3 / 2.483e-3 kg m^2). The CLI accepts `--spacecraft file.json` (validated), and the JSON export embeds the spacecraft. Assumption: the CAD output axes are the body axes. The Dynamics model will consume this configuration.
+
+#### Spacecraft and subsystem configuration windows
+
+`Spacecraft > Configure subsystems...` lists the subsystem types (Reaction Wheel, Magnetorquer, Camera Based Sun
+Sensor, GNSS Receiver, Magnetometer, IR Camera Horizon Sensor, Gyroscope/IMU, ADCS Controller tuning). Each opens a form
+with engineering parameters: drop-down menus for fixed choices (core material, horizon architecture...) and entry
+fields for numbers, with the derived performance shown live (a magnetorquer's turns, wire diameter, core material and
+dimensions give its dipole, resistance, power and mass; a wheel's rotor mass and radius give its inertia and momentum
+capacity). **Save** stores the configuration under a name you choose in `simulation/data/subsystems/<type>/`
+(for example "Sun Sensor CubeSat-5"); **Export/Import file** exchange single configurations.
+
+`Spacecraft > Configure spacecraft...` edits what is decided when the vehicle is assembled: mass properties (opens the
+mass-properties editor), body dimensions and surface properties, residual magnetic moment, wheel layout and skew,
+gyroscope/magnetometer mounting angles, horizon-camera mounting, and which saved subsystem configuration is fitted in
+each slot (the horizon sensor may be left unfitted). Environment settings (field-model noise, atmosphere, GNSS
+outages, orbit) are intentionally not part of it. **Export/Import** write one `spacecraft_assembly` JSON that embeds the
+attached subsystem parameters, so it can be opened on another machine; legacy mass-properties files still import.
+In code, `SpacecraftAssembly.simulation(env)` builds a `ClosedLoopSimulation` from the assembly. 
+#### Closed-loop ADCS run
+
+`Spacecraft > Run closed-loop ADCS...` runs the assembled spacecraft through the full loop (truth dynamics with
+disturbances, noisy gyro, magnetometer, Sun sensor, horizon sensor and GNSS, the attitude estimator, the controller,
+wheels and magnetorquers) and plots the true pointing error, estimation error, body rate, wheel momentum and dipole
+(grey bands: eclipse). Choose an analytic circular orbit (fast, no files) or the SGP4 TLE, WMM and Huira Sun
+entered in the main window; set duration, initial rate/offset and GNSS outage windows. The same run from the CLI:
+
+    python -m openadcs_sim.cli --closed-loop --environment analytic --spacecraft craft.json \
+        --duration-seconds 1800 --initial-offset-deg 20 -15 30 --gnss-outage 600 900
+
+It prints one JSON line per `--output-every` steps and a summary (RMS/max errors, peak wheel momentum) on stderr. With
+`--environment sgp4` (default) pass `--tle`, `--kernels` and `--start` as usual.
+
+Control loop: DETUMBLE uses B-dot (`m = k * omega x B`) on the magnetorquers; ACQUISITION damps the rate with the
+wheels; NOMINAL is a PID-type quaternion-error law, `tau = -Kp e - Kd (w - w_ref) - integral + w x h`, tracking the
+nadir reference (wheel torque, with friction feed-forward and a null-space speed bias). Wheels are unloaded with
+`m = B x tau / |B|^2`. Attitude comes from an MEKF fusing gyro, Sun, magnetometer and horizon data.
+
+All built-in subsystem defaults are assumptions (see the model sections above).
 ## Attitude dynamics (torque-driven truth)
 
 `simulation/src/openadcs_sim/dynamics.py` integrates the rigid-body equations (quaternion body to GCRS, body rate, RK4, 2 s max step) with the inertia from the spacecraft JSON. Torques: gravity gradient plus an `external_torque(t, q, omega_B)` hook where the actuator and disturbance models will plug in. It implements `AttitudeModel`, so it replaces the ideal nadir reference when enabled: GUI checkbox "Torque-driven attitude (dynamics)" in the Spacecraft box, or `python -m openadcs_sim.cli --dynamics [--initial-rate WX WY WZ]`. The start state is nadir-pointing at the orbit rate. Scrubbing backwards restarts from stored checkpoints.
@@ -759,7 +797,7 @@ Closing a tab hides it without discarding results, animation
 time, or its camera/zoom. Reopening displays the current shared time. **Samples**,
 **Guide**, and **Diagnostics** remain available even with all graphics closed.
 
-The separate **Spacecraft** and **Earth context** tabs follow the selected sample.
+The **Spacecraft** tab follows the selected sample.
 The local view contains a procedural 3U CubeSat
 (0.1 x 0.1 x 0.34 m bus with deployable panels), body axes, and normalized direction
 arrows for inertial velocity, magnetic field, Sun and the +Z attitude boresight.
@@ -774,12 +812,13 @@ not a constant inertial attitude. `AttitudeState` stores a full body-to-GCRS
 rotation matrix and `AttitudeModel` is the replacement interface for future ADCS.
 A boresight arrow alone does not describe the complete attitude.
 
-The **Earth context** tab also uses spacecraft-fixed coordinates. Earth's
-center and its WGS84 surface are translated and rotated into the same body frame,
-using 6378.137 km equatorial and 6356.752314 km polar radii. Earth and its distance
-are to scale in kilometers; the spacecraft is a marker, not an enlarged physical
-satellite. The local model uses meters. Separating these scales prevents a
-visible spacecraft model from misrepresenting Earth's radius or altitude.
+The **3D trajectory** tab is STK-style: a textured Earth (NASA Blue Marble, `simulation/assets/earth`) on a
+star field, the orbit path, a spacecraft marker and Sun / B / nadir / velocity vectors at the marker.
+The **Ground track** tab shows the track on a textured equirectangular map with a 30 deg grid, a
+spacecraft label and the horizon-limited footprint circle (spherical Earth). Rotate by dragging and zoom
+with the mouse wheel. Parts of the orbit and vectors hidden behind the Earth are not drawn. Every plot tab has a
+**Pop out** button that moves it to a resizable window with the pan/zoom toolbar; **Dock** (or closing the
+window) returns it to the tab.
 Environment JSON/CSV schemas remain unchanged; attitude currently belongs to the
 visualization layer, not a new simulated controller or torque model.
 

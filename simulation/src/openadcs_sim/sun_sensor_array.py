@@ -2,7 +2,7 @@
 
 Heads sit on the cube faces (+/-X, +/-Y, +/-Z of the body frame), boresights along the face normals.
 Each head is the ``black_sun_sensor`` pinhole centroid model with the OV5640 geometry
-(2592x1944 px, 1.4 um, default pinhole FOV from f = 1.78 mm, 103.8 deg diagonal).  The centroid error is a user
+(2592x1944 px, 1.4 um, 120 deg diagonal FOV baseline; the vendor f = 1.78 mm is only 103.8 deg as a pure pinhole, so 120 deg stands in for the fisheye).  The centroid error is a user
 characterisation (ASSUMPTION; the module datasheet gives none).  Lens distortion, the rolling
 shutter, glare and radiation are NOT modelled.  Earth albedo is a simple centroid pull (see `albedo.py`).
 """

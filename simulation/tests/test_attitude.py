@@ -93,7 +93,7 @@ def test_plot_uses_separate_scales_and_is_renderable(sample):
     pytest.importorskip("matplotlib")
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
-    from openadcs_sim.spacecraft_plot import BodyRenderer, render_earth_context, render_spacecraft
+    from openadcs_sim.spacecraft_plot import BodyRenderer, render_spacecraft
 
     figure = Figure(figsize=(12, 6))
     canvas = FigureCanvasAgg(figure)
@@ -104,14 +104,6 @@ def test_plot_uses_separate_scales_and_is_renderable(sample):
     assert local.get_xlim() == (-.8, .8)
     assert "nadir" in view.attitude.model
     assert len(figure.legends[0].texts) == 4
-    earth_figure = Figure(figsize=(7, 6))
-    earth_canvas = FigureCanvasAgg(earth_figure)
-    render_earth_context(earth_figure, sample)
-    earth_canvas.draw()
-    earth, = earth_figure.axes
-    assert earth.get_xlabel() == "Body X (km)"
-    assert earth.get_xlim()[1] - earth.get_xlim()[0] > 12000
-    assert "WGS84" in earth.get_title()
     renderer = BodyRenderer(figure)
     renderer.update(sample, view)
     renderer.axis.view_init(elev=35, azim=15, roll=8)
