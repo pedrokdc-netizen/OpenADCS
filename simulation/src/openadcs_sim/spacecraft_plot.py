@@ -3,7 +3,7 @@ from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 
-from .attitude import AttitudeModel, BodyView, earth_surface_body_m, spacecraft_view, unit_vector
+from .attitude import AttitudeModel, BodyView, spacecraft_view, unit_vector
 from .environment import EnvironmentSample
 
 VECTOR_COLORS = ("#22d3ee", "#4ade80", "#fde047", "#f472b6")
@@ -55,26 +55,16 @@ def style_body_axis(axis, units: str) -> None:
 class BodyRenderer:
     """Keep axes and static geometry alive so playback preserves camera/zoom."""
 
-    def __init__(self, figure: Figure, earth_context: bool = False):
+    def __init__(self, figure: Figure):
         self.figure = figure
-        self.earth_context = earth_context
         figure.clear()
         figure.set_facecolor("#0f172a")
         self.axis = figure.add_subplot(projection="3d")
-        style_body_axis(self.axis, "km" if earth_context else "m")
+        style_body_axis(self.axis, "m")
         self.header = figure.suptitle("", color="#f8fafc", fontsize=10)
         self.dynamic_artists = []
         self.auto_limits = None
-        if earth_context:
-            self.axis.scatter(0, 0, 0, color="#f8fafc", s=28)
-            self.axis.text(0, 0, -500, "Spacecraft origin", color="#e2e8f0", fontsize=8)
-            self.center_line, = self.axis.plot([], [], [], color="#f472b6", linestyle="--", linewidth=1)
-            self.center_marker, = self.axis.plot([], [], [], color="#93c5fd", marker="o", linestyle="None")
-            self.axis.set_title(
-                "WGS84 Earth at physical scale\nBody origin at spacecraft; marker not to scale",
-                color="#e2e8f0", fontsize=10, pad=28,
-            )
-        else:
+        if True:
             draw_cubesat(self.axis)
             for index, label in enumerate(("Body +X", "Body +Y", "Body +Z")):
                 endpoint = np.eye(3)[index] * .43
@@ -99,26 +89,7 @@ class BodyRenderer:
         self.header.set_text(
             f"{sample.time_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC | {view.attitude.model}"
         )
-        if self.earth_context:
-            surface = earth_surface_body_m(view) / 1000
-            self.dynamic_artists.append(self.axis.plot_surface(
-                *np.moveaxis(surface, -1, 0), color="#0284c7", alpha=.85,
-                edgecolor="#075985", linewidth=.15, rstride=1, cstride=1,
-            ))
-            center = view.earth_center_body_m / 1000
-            self.center_line.set_data_3d([0, center[0]], [0, center[1]], [0, center[2]])
-            self.center_marker.set_data_3d([center[0]], [center[1]], [center[2]])
-            limits = (self.axis.get_xlim(), self.axis.get_ylim(), self.axis.get_zlim())
-            if self.auto_limits is None or limits == self.auto_limits:
-                points = np.vstack((surface.reshape(-1, 3), np.zeros((1, 3))))
-                lower, upper = np.min(points, axis=0), np.max(points, axis=0)
-                midpoint = (lower + upper) / 2
-                span = float(np.max(upper - lower)) * .56
-                self.axis.set(xlim=(midpoint[0] - span, midpoint[0] + span),
-                              ylim=(midpoint[1] - span, midpoint[1] + span),
-                              zlim=(midpoint[2] - span, midpoint[2] + span))
-                self.auto_limits = (self.axis.get_xlim(), self.axis.get_ylim(), self.axis.get_zlim())
-        else:
+        if True:
             directions = (
                 unit_vector(view.velocity_body_m_s), unit_vector(view.magnetic_body_t),
                 view.sun_body_direction, view.attitude_body_direction,
@@ -138,10 +109,3 @@ def render_spacecraft(
     BodyRenderer(figure).update(sample, view)
     return view
 
-
-def render_earth_context(
-    figure: Figure, sample: EnvironmentSample, attitude_model: AttitudeModel | None = None,
-) -> BodyView:
-    view = spacecraft_view(sample, attitude_model)
-    BodyRenderer(figure, earth_context=True).update(sample, view)
-    return view

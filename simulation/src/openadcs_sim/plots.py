@@ -10,11 +10,12 @@ from .attitude import AttitudeModel, BodyView, spacecraft_view
 from .environment import EnvironmentSample
 from .scenario import Readout, sample_readout
 from .spacecraft_plot import BodyRenderer
+from . import earth_view
+from .view_tools import enable_wheel_zoom
 
 COLORS = ("#2563eb", "#16a34a", "#db2777")
 VIEW_TITLES = {
     "spacecraft": "Spacecraft",
-    "earth": "Earth context",
     "ground": "Ground track",
     "trajectory": "3D trajectory",
     "magnetic": "Magnetics",
@@ -42,6 +43,9 @@ class PlotPanel:
         self.tabs: dict[str, ttk.Frame] = {}
         self.view_figures: dict[str, Figure] = {}
         self.view_canvases: dict[str, FigureCanvasTkAgg] = {}
+        self.toolbars: dict[str, NavigationToolbar2Tk] = {}
+        self.popout_buttons: dict[str, ttk.Button] = {}
+        self.windows: dict[str, tk.Toplevel] = {}
         self.markers = {}
         self.start_time = None
         self.figures: list[Figure] = []
@@ -68,23 +72,79 @@ class PlotPanel:
                 self.sun_sensor_panel = SunSensorPanel(frame, self._horizon_view)
                 self.sun_sensor_panel.pack(side=tk.BOTTOM, fill=tk.X)
             figure = Figure(figsize=(7, 4.5), dpi=100,
-                            layout=None if key in ("spacecraft", "earth") else "constrained")
+                            layout=None if key in ("spacecraft", "trajectory") else "constrained")
             canvas = FigureCanvasTkAgg(figure, master=frame)
             toolbar = NavigationToolbar2Tk(canvas, frame, pack_toolbar=False)
             toolbar.pack(side=tk.BOTTOM, fill=tk.X)
             canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             self.view_figures[key] = figure
             self.view_canvases[key] = canvas
-            if key not in ("spacecraft", "earth"):
+            self.toolbars[key] = toolbar
+            enable_wheel_zoom(figure)
+            button = ttk.Button(frame, text="Pop out", command=lambda k=key: self.toggle_popout(k))
+            button.pack(side=tk.TOP, anchor=tk.E, padx=4, pady=2)
+            self.popout_buttons[key] = button
+            if key == "trajectory":
+                figure.canvas.mpl_connect("motion_notify_event", self._refresh_scene_if_dragging)
+                figure.canvas.mpl_connect("button_release_event", self._refresh_scene_if_dragging)
+            if key != "spacecraft":
                 self.figures.append(figure)
                 self.canvases.append(canvas)
         self.spacecraft_figure = self.view_figures["spacecraft"]
         self.spacecraft_canvas = self.view_canvases["spacecraft"]
         self.spacecraft_tab = self.tabs["spacecraft"]
-        self.earth_figure = self.view_figures["earth"]
-        self.earth_tab = self.tabs["earth"]
         notebook.bind("<<NotebookTabChanged>>", lambda _: self.refresh_active(), add="+")
         self.clear()
+
+    def _refresh_scene_if_dragging(self, event) -> None:
+        scene = self.markers.get("trajectory_scene")
+        if scene is not None and (event.name == "button_release_event" or event.button is not None):
+            scene.refresh()
+            event.canvas.draw_idle()
+
+    def _mount_canvas(self, key: str, master) -> None:
+        figure = self.view_figures[key]
+        old = self.view_canvases[key]
+        old.get_tk_widget().destroy()
+        self.toolbars[key].destroy()
+        canvas = FigureCanvasTkAgg(figure, master=master)
+        toolbar = NavigationToolbar2Tk(canvas, master, pack_toolbar=False)
+        toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.view_canvases[key], self.toolbars[key] = canvas, toolbar
+        if figure in self.figures:
+            self.canvases[self.figures.index(figure)] = canvas
+        if key == "spacecraft":
+            self.spacecraft_canvas = canvas
+        canvas.draw_idle()
+
+    def toggle_popout(self, key: str) -> None:
+        if key in self.windows:
+            self.dock(key)
+        else:
+            self.popout(key)
+
+    def popout(self, key: str) -> None:
+        if key in self.windows:
+            self.windows[key].lift()
+            return
+        window = tk.Toplevel(self.tabs[key])
+        window.title(f"OpenADCS - {VIEW_TITLES[key]}")
+        window.geometry("1100x760")
+        window.minsize(420, 320)
+        window.protocol("WM_DELETE_WINDOW", lambda: self.dock(key))
+        self.windows[key] = window
+        self._mount_canvas(key, window)
+        self.popout_buttons[key].configure(text="Dock")
+
+    def dock(self, key: str) -> None:
+        window = self.windows.pop(key, None)
+        if window is None:
+            return
+        # the figure keeps its artists and state; only the Tk canvas moves
+        self._mount_canvas(key, self.tabs[key])
+        window.destroy()
+        self.popout_buttons[key].configure(text="Pop out")
 
     def _horizon_view(self, sample: EnvironmentSample) -> BodyView:
         return spacecraft_view(sample, self.attitude_model)   # no shared cache: also called from a thread
@@ -114,7 +174,7 @@ class PlotPanel:
             return
         if key == "sun" and self.selected_sample is not None:
             self.sun_sensor_panel.show_sample(self.selected_sample)
-        if self.selected_sample is not None and key in ("spacecraft", "earth"):
+        if self.selected_sample is not None and key == "spacecraft":
             if self._rendered_samples.get(key) is not self.selected_sample:
                 if self._body_sample is not self.selected_sample:
                     self._body_view = spacecraft_view(self.selected_sample, self.attitude_model)
@@ -123,7 +183,7 @@ class PlotPanel:
                     raise RuntimeError("Selected spacecraft sample has no body-frame state")
                 renderer = self._body_renderers.get(key)
                 if renderer is None:
-                    renderer = BodyRenderer(self.view_figures[key], earth_context=key == "earth")
+                    renderer = BodyRenderer(self.view_figures[key])
                     self._body_renderers[key] = renderer
                 renderer.update(self.selected_sample, self._body_view)
                 self._rendered_samples[key] = self.selected_sample
@@ -140,10 +200,12 @@ class PlotPanel:
                 row = sample_readout(sample)
                 ground[0].set_data([row.longitude_deg], [row.latitude_deg])
                 ground[1].set_data([elapsed], [row.altitude_km])
+                ground[2].set_position((row.longitude_deg + 3, row.latitude_deg + 3))
+                ground[3].set_data(*earth_view.footprint(row.longitude_deg, row.latitude_deg, row.altitude_km))
             trajectory = self.markers.get("trajectory")
             if trajectory is not None:
                 point = sample.position_itrs_m / 1000
-                trajectory.set_data_3d([point[0]], [point[1]], [point[2]])
+                self.markers["trajectory_scene"].set_sample(sample, point)
             for key in ("magnetic", "sun"):
                 if key in self.markers:
                     self.markers[key].set_xdata([elapsed, elapsed])
@@ -161,11 +223,12 @@ class PlotPanel:
         self.sun_sensor_panel.clear()
         for key, figure in self.view_figures.items():
             figure.clear()
-            body = key in ("spacecraft", "earth")
+            body = key in ("spacecraft", "trajectory", "ground")
             figure.set_facecolor("#0f172a" if body else "white")
             axis = figure.add_subplot()
             if body:
                 axis.set_facecolor("#0f172a")
+                figure.set_facecolor(earth_view.SPACE if key != "spacecraft" else "#0f172a")
             axis.text(
                 0.5, 0.5, "Configure a scenario, then click Run simulation.",
                 ha="center", va="center", transform=axis.transAxes, color="#e2e8f0" if body else "#64748b",
@@ -191,44 +254,63 @@ class PlotPanel:
 
         figure = self.figures[0]
         figure.clear()
-        track, altitude = figure.subplots(2, 1)
+        figure.set_facecolor(earth_view.SPACE)
+        track, altitude = figure.subplots(2, 1, gridspec_kw={"height_ratios": [3, 1]})
         longitude, latitude = ground_track(
             np.array([row.longitude_deg for row in derived]),
             np.array([row.latitude_deg for row in derived]),
         )
-        track.plot(longitude, latitude, color=COLORS[0], linewidth=1.3)
-        track.scatter([derived[0].longitude_deg], [derived[0].latitude_deg], color=COLORS[1], label="Start")
-        track_marker, = track.plot([derived[-1].longitude_deg], [derived[-1].latitude_deg],
-                                   color=COLORS[2], marker="o", linestyle="None", label="Current time")
+        image = earth_view.texture()
+        if image is not None:
+            track.imshow(image, extent=(-180, 180, -90, 90), aspect="auto", zorder=0)
+        else:
+            track.set_facecolor("#1e3a5f")
+        track.set_xticks(range(-180, 181, 30))
+        track.set_yticks(range(-90, 91, 30))
+        track.grid(color="white", alpha=0.35, linewidth=0.6)
+        track.plot(longitude, latitude, color="#facc15", linewidth=1.6, zorder=3)
+        track.scatter([derived[0].longitude_deg], [derived[0].latitude_deg], color=COLORS[1], zorder=4, label="Start")
+        track_marker, = track.plot([derived[-1].longitude_deg], [derived[-1].latitude_deg], color="#ef4444",
+                                   marker="o", markeredgecolor="white", linestyle="None", zorder=5, label="Spacecraft")
+        label = track.annotate("Pilot1", (derived[-1].longitude_deg + 3, derived[-1].latitude_deg + 3),
+                               color="white", fontsize=9, zorder=6)
+        footprint_line, = track.plot(*earth_view.footprint(derived[-1].longitude_deg, derived[-1].latitude_deg,
+                                                           derived[-1].altitude_km),
+                                     color="#38bdf8", linewidth=1.4, zorder=4, label="Horizon footprint")
         track.set(xlim=(-180, 180), ylim=(-90, 90), xlabel="Longitude (deg)", ylabel="Latitude (deg)",
-                  title="WGS84 sub-satellite ground track (coordinate grid, not a basemap)")
-        track.legend(loc="upper right", fontsize=8)
+                  title="Ground track (2D)")
+        track.legend(loc="lower left", fontsize=8)
         altitude.plot(elapsed, [row.altitude_km for row in derived], color=COLORS[0], marker=marker)
         altitude_marker, = altitude.plot([elapsed[-1]], [derived[-1].altitude_km],
                                          color=COLORS[2], marker="o", linestyle="None")
-        self.markers["ground"] = (track_marker, altitude_marker)
+        self.markers["ground"] = (track_marker, altitude_marker, label, footprint_line)
         altitude.set(xlabel="Elapsed time (min)", ylabel="Geodetic altitude (km)")
+        altitude.grid(alpha=0.25)
+        altitude.set_facecolor("white")
         for axis in (track, altitude):
-            axis.grid(alpha=0.25)
+            axis.tick_params(colors="#e2e8f0")
+            axis.xaxis.label.set_color("#e2e8f0")
+            axis.yaxis.label.set_color("#e2e8f0")
+            axis.title.set_color("#e2e8f0")
 
         figure = self.figures[1]
         figure.clear()
+        figure.set_facecolor(earth_view.SPACE)
+        earth_view.draw_stars(figure)
         axis = figure.add_subplot(projection="3d")
-        azimuth, polar = np.meshgrid(np.linspace(0, 2 * np.pi, 36), np.linspace(0, np.pi, 20))
-        radius = 6371
-        axis.plot_surface(
-            radius * np.cos(azimuth) * np.sin(polar),
-            radius * np.sin(azimuth) * np.sin(polar),
-            radius * np.cos(polar), color="#93c5fd", alpha=0.25, linewidth=0,
-        )
-        axis.plot(*position.T, color=COLORS[0], linewidth=1.4)
-        trajectory_marker, = axis.plot([position[-1, 0]], [position[-1, 1]], [position[-1, 2]],
-                                       color=COLORS[2], marker="o", linestyle="None")
-        self.markers["trajectory"] = trajectory_marker
+        axis.set_position((0, 0, 1, 1))
+        axis.set_facecolor("none")
         limit = max(float(np.max(np.abs(position))) * 1.1, 7000)
-        axis.set(xlabel="ITRS X (km)", ylabel="ITRS Y (km)", zlabel="ITRS Z (km)",
-                 xlim=(-limit, limit), ylim=(-limit, limit), zlim=(-limit, limit),
-                 title="Earth-fixed trajectory; Earth sphere is illustrative")
+        earth_view.draw_globe(axis)
+        scene = earth_view.TrajectoryScene(axis, position, limit)
+        self.markers["trajectory"] = scene.marker
+        self.markers["trajectory_scene"] = scene
+        for artist in (*axis.collections, *axis.lines):
+            artist.set_clip_path(None)   # 3D axes are square; clip to the whole figure instead
+            artist.set_clip_box(figure.bbox)
+        axis.set(xlim=(-limit, limit), ylim=(-limit, limit), zlim=(-limit, limit))
+        figure.text(0.5, 0.97, "3D trajectory (Earth-fixed ITRS)", color="#e2e8f0", ha="center", va="top")
+        axis.set_axis_off()
         axis.set_box_aspect((1, 1, 1))
 
         for figure, values, title, ylabel in (

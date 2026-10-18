@@ -211,7 +211,8 @@ class ClosedLoopSimulation:
                  initial_rate_rad_s=(0.0, 0.0, 0.0), initial_attitude_offset_rad=(0.0, 0.0, 0.0),
                  initial_wheel_speeds_rad_s=None, seed: int = 0, use_horizon: bool = True,
                  gnss: GnssConfig | None = GnssConfig(), disturbances: DisturbanceConfig | None = DisturbanceConfig(),
-                 thermal: ThermalConfig | None = None):
+                 thermal: ThermalConfig | None = None, gyro_config: GyroConfig | None = None,
+                 magnetometer_config: MagnetometerConfig | None = None, sun_config=None, horizon_config=None):
         self.env, self.dt = env, dt_s
         self.epoch = epoch or datetime(2026, 1, 1, tzinfo=timezone.utc)
         self.wheels = wheels or ReactionWheelArray()
@@ -225,12 +226,13 @@ class ClosedLoopSimulation:
             controller=lambda *args: self.command, magnetic_field=lambda t, r: self.env(t).b_gcrs_t,
             initial_rate_body_rad_s=initial_rate_rad_s, initial_attitude_offset_rad=initial_attitude_offset_rad,
             initial_wheel_speeds_rad_s=initial_wheel_speeds_rad_s, disturbance=self._disturbance_torque)
-        self.gyro, self.mag = default_gyro(seed + 1), default_magnetometer(seed + 2)
+        self.gyro = GyroModel(gyro_config) if gyro_config else default_gyro(seed + 1)
+        self.mag = MagnetometerModel(magnetometer_config) if magnetometer_config else default_magnetometer(seed + 2)
         self.gnss = GnssNoiseModel(gnss, seed + 4) if gnss is not None else None   # None = ideal GNSS
         self.thermal = ThermalNode(thermal) if thermal is not None else None   # None = constant 20 C
         self._temperature_c = 20.0
-        self.sun_sensor = SunSensorArray()
-        self.horizon = HorizonSensorModel(HorizonSensorConfig(mode="law"), seed=seed + 3) if use_horizon else None
+        self.sun_sensor = SunSensorArray(sun_config) if sun_config else SunSensorArray()
+        self.horizon = HorizonSensorModel(horizon_config or HorizonSensorConfig(mode="law"), seed=seed + 3) if use_horizon else None
 
     def _disturbance_torque(self, t, q, omega, r, v):
         if self.disturbance_model is None:

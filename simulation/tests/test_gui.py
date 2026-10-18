@@ -59,7 +59,7 @@ def app(tk_root):
 
 
 def test_gui_defaults_and_training_controls(app):
-    assert len(app.notebook.tabs()) == 11
+    assert len(app.notebook.tabs()) == 10
     assert str(app.stop_button["state"]) == "disabled"
     assert str(app.csv_button["state"]) == "disabled"
     assert "571 samples" in app.schedule_info.get()
@@ -192,7 +192,7 @@ def test_shared_timeline_controls_and_recorded_state(recorded_app):
     assert "Sample 2 / 4" in app.sample_info.get()
     assert "12:00:15" in app.animation_time.get()
     assert "12:00:10" in app.animation_time.get()
-    ground, altitude = app.plotter.markers["ground"]
+    ground, altitude = app.plotter.markers["ground"][:2]
     assert ground.get_xdata()[0] == app.readouts[1].longitude_deg
     assert altitude.get_xdata()[0] == pytest.approx(10 / 60)
     for key in ("magnetic", "sun"):
@@ -339,19 +339,6 @@ def test_new_run_stops_and_clears_recorded_playback(recorded_app, monkeypatch, t
     app.worker = None
 
 
-def test_earth_camera_survives_sample_updates(recorded_app):
-    app = recorded_app
-    app.plotter.set_visible("earth", True)
-    renderer = app.plotter._body_renderers["earth"]
-    renderer.axis.view_init(elev=42, azim=30)
-    renderer.axis.set_xlim(-3000, 3000)
-    limits = (renderer.axis.get_xlim(), renderer.axis.get_ylim(), renderer.axis.get_zlim())
-    app.seek_playback("20")
-    assert app.plotter._body_renderers["earth"] is renderer
-    assert (renderer.axis.elev, renderer.axis.azim) == (42, 30)
-    assert (renderer.axis.get_xlim(), renderer.axis.get_ylim(), renderer.axis.get_zlim()) == limits
-
-
 def test_invalid_inputs_do_not_start_worker(app, monkeypatch):
     errors = []
     monkeypatch.setattr("openadcs_sim.gui.messagebox.showerror", lambda *args, **kwargs: errors.append(args))
@@ -445,12 +432,8 @@ def test_gui_runs_real_physics_and_restores_controls(app, monkeypatch):
     assert "Sample 1 / 4" in app.sample_info.get()
     assert "Earth-fixed km/s" in app.details.get()
     assert len(app.plotter.figures[0].axes) == 2
-    assert len(app.plotter.figures[1].axes) == 1
+    assert len(app.plotter.figures[1].axes) == 2   # star backdrop + 3D axes
     assert len(app.plotter.spacecraft_figure.axes) == 1
-    app.notebook.select(app.plotter.earth_tab)
-    app.root.update_idletasks()
-    app.plotter.refresh_active()
-    assert len(app.plotter.earth_figure.axes) == 1
     assert app.plotter.selected_sample is app.samples[0]
     app.inspect_sample("3")
     assert app.plotter.selected_sample is app.samples[3]
@@ -506,3 +489,66 @@ def test_spacecraft_window_edit_apply_and_load(app, tmp_path):
     assert app.spacecraft.mass_kg == pytest.approx(0.5)
     assert window.mass.get() == "500"
     window.destroy()
+
+
+def test_spacecraft_and_subsystem_windows_open_from_the_app(app, tmp_path):
+    from openadcs_sim import subsystems
+    from openadcs_sim.assembly import SpacecraftAssembly
+
+    app.open_subsystem_window()
+    assert app.subsystem_window.winfo_exists()
+    app.subsystem_window.destroy()
+    app.open_assembly_window()
+    window = app.assembly_window
+    window.mass_properties = window.mass_properties
+    window.name.set("Pilot1 variant")
+    applied = window.apply()
+    assert isinstance(applied, SpacecraftAssembly) and app.assembly.mass_properties.name == "Pilot1 variant"
+    assert app.spacecraft.name == "Pilot1 variant"
+    window.destroy()
+
+
+
+def test_trajectory_masks_hidden_orbit_and_shows_vectors(recorded_app):
+    import numpy as np
+
+    app = recorded_app
+    scene = app.plotter.markers["trajectory_scene"]
+    app.plotter.render_selected(app.samples[1])
+    for key, (line, text) in scene.vectors.items():
+        x, y, z = line.get_data_3d()
+        assert np.isfinite(x).any(), key
+    axis = scene.axis
+    axis.view_init(elev=0, azim=0)
+    scene.refresh()
+    x, _, _ = scene.orbit.get_data_3d()
+    assert np.isnan(x).any() or not scene.occluded(scene.position).any()
+    hidden = scene.occluded(np.array([[-7000.0, 0.0, 0.0], [7000.0, 0.0, 0.0]]))
+    assert list(hidden) == [True, False]
+
+
+def test_wheel_zoom_and_popout(recorded_app):
+    from types import SimpleNamespace
+
+    from openadcs_sim.view_tools import on_scroll
+
+    app = recorded_app
+    plotter = app.plotter
+    figure = plotter.view_figures["trajectory"]
+    on_scroll(SimpleNamespace(button="up", canvas=figure.canvas, inaxes=None, xdata=None, ydata=None))
+    assert figure.axes[-1]._oa_zoom > 1
+    track = plotter.view_figures["ground"]
+    axis = track.axes[0]
+    width = axis.get_xlim()[1] - axis.get_xlim()[0]
+    on_scroll(SimpleNamespace(button="up", canvas=track.canvas, inaxes=axis, xdata=0.0, ydata=0.0))
+    assert axis.get_xlim()[1] - axis.get_xlim()[0] < width
+    old_canvas = plotter.view_canvases["trajectory"]
+    plotter.popout("trajectory")
+    app.root.update_idletasks()
+    assert "trajectory" in plotter.windows
+    assert plotter.view_canvases["trajectory"] is not old_canvas
+    assert plotter.view_canvases["trajectory"].figure is figure
+    plotter.render_selected(app.samples[2])
+    plotter.dock("trajectory")
+    assert not plotter.windows
+    assert str(plotter.view_canvases["trajectory"].get_tk_widget().master) == str(plotter.tabs["trajectory"])

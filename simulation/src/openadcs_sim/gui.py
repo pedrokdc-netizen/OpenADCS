@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 import queue
@@ -11,6 +12,7 @@ from .gui_runner import FinishedEvent, RunWorker, SampleEvent
 from .orbit import SGP4Propagator
 from .playback import PlaybackClock
 from .scenario import KERNEL_NAMES, Readout, Scenario, export_results, parse_tle, sampling_count, training_tle, baseline_tle
+from .assembly import SpacecraftAssembly
 from .spacecraft import pilot1_baseline
 
 GUIDE = """QUICK START
@@ -62,8 +64,7 @@ Body +Z points to Earth's center, +X follows horizontal inertial velocity, and
 The attitude arrow is the +Z boresight; a full rotation matrix carries orientation.
 Velocity is inertial translational velocity expressed in body axes, not spin rate.
 Local 3U CubeSat dimensions are in meters; vector lengths are schematic.
-Earth context uses WGS84 equatorial/polar radii and physical distance in kilometers.
-Its spacecraft marker is not to scale; meters and planetary scales are separate.
+The 3D trajectory shows a textured Earth with Sun, B, nadir and velocity vectors.
 Plots show up to 3000 points for responsiveness; exports retain every sample.
 
 MODEL LIMITS
@@ -135,6 +136,10 @@ class SimulationApp:
         self.input_widgets: list[tk.Widget] = []
         self.spacecraft = pilot1_baseline()
         self.spacecraft_window = None
+        self.assembly = SpacecraftAssembly(self.spacecraft)
+        self.assembly_window = None
+        self.subsystem_window = None
+        self.closed_loop_window = None
         self.spacecraft_info = tk.StringVar(value=f"{self.spacecraft.name} | {self.spacecraft.mass_kg * 1000:g} g")
 
         style = ttk.Style(root)
@@ -230,7 +235,11 @@ class SimulationApp:
         self.window_menu.configure(postcommand=self.update_window_menu)
         menu.add_cascade(label="Window", menu=self.window_menu)
         spacecraft_menu = tk.Menu(menu, tearoff=False)
-        spacecraft_menu.add_command(label="Define spacecraft...", command=self.open_spacecraft_window)
+        spacecraft_menu.add_command(label="Configure spacecraft...", command=self.open_assembly_window)
+        spacecraft_menu.add_command(label="Configure subsystems...", command=self.open_subsystem_window)
+        spacecraft_menu.add_command(label="Run closed-loop ADCS...", command=self.open_closed_loop_window)
+        spacecraft_menu.add_separator()
+        spacecraft_menu.add_command(label="Mass properties only...", command=self.open_spacecraft_window)
         menu.add_cascade(label="Spacecraft", menu=spacecraft_menu)
         self.root.configure(menu=menu)
 
@@ -245,8 +254,49 @@ class SimulationApp:
             return
         self.spacecraft_window = SpacecraftWindow(self.root, self.spacecraft, self.set_spacecraft)
 
+    def open_assembly_window(self) -> None:
+        from .assembly_window import AssemblyWindow
+
+        window = self.assembly_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            return
+        self.assembly_window = AssemblyWindow(self.root, self.assembly, self.set_assembly)
+
+    def open_closed_loop_window(self) -> None:
+        from .closed_loop_window import ClosedLoopWindow
+
+        window = self.closed_loop_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.refresh_label()
+            return
+        self.closed_loop_window = ClosedLoopWindow(self.root, lambda: self.assembly, self.closed_loop_ephemeris)
+
+    def closed_loop_ephemeris(self) -> tuple:
+        """TLE, kernel directory and start time currently entered in the main window."""
+        return (parse_tle(self.tle_text.get("1.0", tk.END)), Path(self.kernel_value.get()).resolve(),
+                datetime.fromisoformat(self.start_value.get().strip().replace("Z", "+00:00")))
+
+    def open_subsystem_window(self) -> None:
+        from .subsystem_window import SubsystemListWindow
+
+        window = self.subsystem_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            return
+        self.subsystem_window = SubsystemListWindow(self.root)
+
+    def set_assembly(self, assembly) -> None:
+        self.assembly = assembly
+        self.set_spacecraft(assembly.mass_properties)
+
     def set_spacecraft(self, config) -> None:
         self.spacecraft = config
+        self.assembly = replace(self.assembly, mass_properties=config)
         self.spacecraft_info.set(f"{config.name} | {config.mass_kg * 1000:g} g")
         self.apply_attitude_model()
 
